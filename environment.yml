@@ -1,0 +1,18 @@
+name: orbit
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - requests
+      - numpy
+      - opencv-python
+      - pyserial
+      - pyrealsense2
+      - rembg
+      - onnxruntime
+      - open3d
+      - PyQt6
+      - pywin32
+      - pillow

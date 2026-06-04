@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>O.R.B.I.T. 控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark">O</div>
+      <div>
+        <h1>O.R.B.I.T.</h1>
+        <p id="clock">--</p>
+      </div>
+    </div>
+    <div class="chips">
+      <span class="chip" id="chip-realsense">主相机</span>
+      <span class="chip" id="chip-scale">Scale</span>
+      <span class="chip" id="chip-ollama">Ollama</span>
+      <span class="chip" id="chip-homebox">Homebox</span>
+      <span class="chip" id="chip-rfid">RFID</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel intake">
+      <div class="panel-head intake-head">
+        <div class="head-title">
+          <h2>入库</h2>
+          <span id="intakeProfile">scale · --</span>
+        </div>
+        <div class="selectors compact-selectors">
+          <label class="inline-field">模式
+            <select id="mode">
+              <option value="scale">scale</option>
+              <option value="auto">auto</option>
+              <option value="macro">macro</option>
+              <option value="full">full</option>
+              <option value="furniture">furniture</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="weight-band">
+        <div>
+          <span class="label">重量</span>
+          <strong id="weight">--.- g</strong>
+        </div>
+        <span id="stable" class="state">等待</span>
+      </div>
+
+      <div class="controls">
+        <button id="capture" class="button secondary"><span>□</span>拍照</button>
+        <button id="identifySelection" class="button primary"><span>▣</span>识别待确认</button>
+        <button id="scanWrite" class="button danger"><span>●</span>入库</button>
+        <button id="labelWrite" class="button primary"><span>▤</span>写标签</button>
+        <button id="diagnose" class="button secondary"><span>◇</span>诊断</button>
+        <button id="resetSelection" class="button secondary"><span>□</span>重置框</button>
+        <button id="cancel" class="button ghost"><span>×</span>取消</button>
+      </div>
+
+      <div class="result-surface">
+        <div class="image-grid">
+          <div class="image-wrap">
+            <span class="view-label">主相机</span>
+            <img id="preview" alt="最近裁图">
+            <div id="selectionBox" class="selection-box"></div>
+            <div id="emptyPreview">暂无图像</div>
+          </div>
+          <div class="image-wrap aux-wrap">
+            <span class="view-label">辅助相机</span>
+            <img id="auxPreview" alt="辅助视角">
+            <div id="emptyAuxPreview">暂无辅助图</div>
+          </div>
+        </div>
+        <div class="task-meta">
+          <span class="label">任务</span>
+          <strong id="taskTitle">空闲</strong>
+          <p id="taskState">--</p>
+        </div>
+      </div>
+
+      <div class="editor" id="editor">
+        <div class="editor-head">
+          <div>
+            <span class="label">待确认物品</span>
+            <strong id="editorStatus">识别后可编辑</strong>
+          </div>
+          <button id="discardPending" class="mini-button">丢弃</button>
+        </div>
+        <div class="form-grid">
+          <label>名称<input id="fieldName" autocomplete="off"></label>
+          <label>分类<input id="fieldCategory" autocomplete="off"></label>
+          <label>制造商/品牌<input id="fieldManufacturer" autocomplete="off"></label>
+          <label>型号<input id="fieldModel" autocomplete="off"></label>
+          <label>数量<input id="fieldQuantity" type="number" min="1" step="1"></label>
+          <label>重量 g<input id="fieldWeight" type="number" step="0.1"></label>
+          <label>尺寸<input id="fieldSize" autocomplete="off"></label>
+          <label class="span-2">分类标签
+            <div class="combo-row">
+              <input id="fieldTags" autocomplete="off">
+              <select id="fieldTagSelect">
+                <option value="">添加已有标签</option>
+              </select>
+            </div>
+          </label>
+          <label class="span-2">建议位置
+            <div class="combo-row">
+              <input id="fieldLocation" autocomplete="off">
+              <select id="fieldLocationSelect">
+                <option value="">选择已有位置</option>
+              </select>
+            </div>
+          </label>
+          <label class="span-2">描述<textarea id="fieldDescription"></textarea></label>
+          <label class="span-2">识别依据<textarea id="fieldReasoning"></textarea></label>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel modules">
+      <div class="panel-head">
+        <h2>模块</h2>
+        <button id="refreshModels" class="mini-button">刷新模型</button>
+      </div>
+      <div class="module-shell">
+        <nav class="module-tabs" aria-label="模块选择">
+          <button class="module-tab active" data-module="overview"><span><i class="dot" id="tab-overview-dot"></i>总览</span><small id="tab-overview-state">--</small></button>
+          <button class="module-tab" data-module="camera"><span><i class="dot" id="tab-camera-dot"></i>相机</span><small id="tab-camera-state">--</small></button>
+          <button class="module-tab" data-module="ai"><span><i class="dot" id="tab-ai-dot"></i>AI</span><small id="tab-ai-state">--</small></button>
+          <button class="module-tab" data-module="scale"><span><i class="dot" id="tab-scale-dot"></i>电子秤</span><small id="tab-scale-state">--</small></button>
+          <button class="module-tab" data-module="rfid"><span><i class="dot" id="tab-rfid-dot"></i>RFID</span><small id="tab-rfid-state">--</small></button>
+          <button class="module-tab" data-module="homebox"><span><i class="dot" id="tab-homebox-dot"></i>Homebox</span><small id="tab-homebox-state">--</small></button>
+        </nav>
+        <div class="module-pages">
+          <section class="module-page active" data-module-page="overview">
+            <div class="module-summary">
+              <div><span>运行链路</span><strong id="moduleChainState">--</strong></div>
+              <div><span>当前任务</span><strong id="moduleTaskState">--</strong></div>
+            </div>
+            <div id="deviceList" class="device-list compact"></div>
+          </section>
+
+          <section class="module-page" data-module-page="camera">
+            <div class="camera-section">
+              <div class="section-title">
+                <strong>主相机</strong>
+                <span>用于俯视拍照、深度和尺寸估算</span>
+              </div>
+              <div class="kv module-kv compact-kv">
+                <span>状态</span><strong id="cameraD435State">--</strong>
+              </div>
+            </div>
+
+            <div class="camera-section">
+              <div class="section-title">
+                <strong>辅助相机</strong>
+                <span>用于侧面补充视角，可更换为任意 USB 摄像头</span>
+              </div>
+            <div class="settings-grid">
+              <label class="span-2 check-field">
+                <input id="auxCameraEnabled" type="checkbox" checked>
+                <span>启用辅助视角</span>
+              </label>
+              <label>设备索引
+                <select id="auxCameraIndex">
+                  <option value="0">0</option>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                  <option value="auto">auto · 不推荐</option>
+                </select>
+              </label>
+              <label>后端
+                <select id="auxCameraBackend">
+                  <option value="dshow">DSHOW</option>
+                  <option value="msmf">MSMF</option>
+                  <option value="any">ANY</option>
+                  <option value="auto">auto</option>
+                </select>
+              </label>
+              <label>宽
+                <input id="auxCameraWidth" type="number" min="320" step="160" value="1280">
+              </label>
+              <label>高
+                <input id="auxCameraHeight" type="number" min="240" step="120" value="720">
+              </label>
+              <label>AI中心裁切
+                <select id="auxCameraCenterCrop">
+                  <option value="1">1.00 · 不裁切</option>
+                  <option value="0.75">0.75</option>
+                  <option value="0.66">0.66</option>
+                  <option value="0.5">0.50</option>
+                </select>
+              </label>
+              <label>预热秒
+                <input id="auxCameraWarmup" type="number" min="0" max="5" step="0.1" value="1.2">
+              </label>
+              <label class="span-2 check-field">
+                <input id="auxCameraAutoExposure" type="checkbox" checked>
+                <span>辅助相机自动曝光</span>
+              </label>
+            </div>
+            <div class="module-actions">
+              <button id="cameraProbe" class="mini-button">测试辅助相机</button>
+            </div>
+            <div class="kv module-kv compact-kv">
+              <span>状态</span><strong id="cameraAuxState">--</strong>
+            </div>
+            </div>
+          </section>
+
+          <section class="module-page" data-module-page="ai">
+            <div class="settings-grid">
+              <label class="span-2">Ollama 机器
+                <div class="radio-group wide" aria-label="Ollama 机器">
+                  <label><input type="radio" name="ollamaTarget" value="local" checked> 本机</label>
+                  <label><input type="radio" name="ollamaTarget" value="lan"> 局域网</label>
+                </div>
+              </label>
+              <label class="span-2">局域网地址
+                <input id="ollamaLanHost" class="host-input full" list="ollamaHosts" value="192.168.31.164:11434" disabled>
+              </label>
+              <datalist id="ollamaHosts">
+                <option value="192.168.31.164:11434"></option>
+                <option value="192.168.31.164"></option>
+              </datalist>
+              <label class="span-2">模型
+                <select id="model">
+                  <option value="gemma3:4b">gemma3:4b</option>
+                </select>
+              </label>
+              <label>输出
+                <select id="tokens">
+                  <option value="192">192 快速</option>
+                  <option value="256">256 稳定</option>
+                  <option value="384">384 长输出</option>
+                </select>
+              </label>
+              <label>图片
+                <select id="imageSize">
+                  <option value="0">原图</option>
+                  <option value="1024">1024</option>
+                  <option value="768">768</option>
+                  <option value="640">640</option>
+                  <option value="512">512 快速</option>
+                </select>
+              </label>
+            </div>
+            <div class="kv module-kv">
+              <span>机器</span><strong id="ollamaEndpoint">--</strong>
+              <span>当前</span><strong id="modelName">--</strong>
+            </div>
+            <pre id="ollamaPs" class="mono"></pre>
+            <div class="module-actions">
+              <button id="restartOllama" class="mini-button">重启本机 Ollama</button>
+            </div>
+          </section>
+
+          <section class="module-page" data-module-page="scale">
+            <div class="settings-grid">
+              <label>串口
+                <select id="scalePort"></select>
+              </label>
+              <label>波特率
+                <select id="scaleBaud">
+                  <option value="9600">9600</option>
+                  <option value="4800">4800</option>
+                  <option value="19200">19200</option>
+                  <option value="115200">115200</option>
+                </select>
+              </label>
+            </div>
+            <div class="kv module-kv">
+              <span>读数</span><strong id="scaleConfigState">--</strong>
+              <span>串口</span><strong id="ports">--</strong>
+            </div>
+          </section>
+
+          <section class="module-page" data-module-page="rfid">
+            <div class="settings-grid">
+              <label class="span-2">串口
+                <select id="rfidPort"></select>
+              </label>
+              <label class="span-2 check-field">
+                <input id="printPetLabels" type="checkbox" checked>
+                <span>写标签时打印 PET 标签</span>
+              </label>
+              <label class="span-2 check-field">
+                <input id="writeRfidTags" type="checkbox" checked>
+                <span>写标签时写 RFID 标签</span>
+              </label>
+            </div>
+            <div class="module-actions">
+              <button id="rfidProbe" class="mini-button">探测 RFID</button>
+            </div>
+            <div class="kv module-kv">
+              <span>状态</span><strong id="rfidConfigState">--</strong>
+            </div>
+          </section>
+
+          <section class="module-page" data-module-page="homebox">
+            <div class="settings-grid">
+              <label class="span-2">Homebox URL
+                <input id="homeboxConfigUrl" class="host-input full" value="http://192.168.31.3:3100">
+              </label>
+              <label>账号
+                <input id="homeboxUsername" class="host-input full" autocomplete="username">
+              </label>
+              <label>密码
+                <input id="homeboxPassword" class="host-input full" type="password" autocomplete="current-password">
+              </label>
+              <label class="span-2">Token
+                <input id="homeboxToken" class="host-input full" type="password" autocomplete="off">
+              </label>
+            </div>
+            <div class="kv module-kv">
+              <span>服务</span><strong id="homeboxUrl">--</strong>
+              <span>认证</span><strong id="homeboxAuthState">未配置</strong>
+            </div>
+            <div class="module-actions">
+              <button id="refreshHomeboxOptions" class="mini-button">刷新标签/位置</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel logs">
+      <div class="panel-head">
+        <h2>日志</h2>
+        <button id="clearLogs" class="mini-button">清空</button>
+      </div>
+      <pre id="logBox" class="log-box"></pre>
+    </section>
+  </main>
+
+  <div id="rfidConfirmModal" class="modal-backdrop" hidden>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="rfidConfirmTitle">
+      <div class="modal-head">
+        <h2 id="rfidConfirmTitle">确认 RFID 标签</h2>
+        <button id="rfidConfirmClose" class="mini-button">取消</button>
+      </div>
+      <div class="modal-body">
+        <div class="rfid-target">
+          <span>将写入</span>
+          <strong id="rfidTargetCode">--</strong>
+        </div>
+        <div id="rfidTagList" class="rfid-tag-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="rfidConfirmRefresh" class="mini-button">重新盘点</button>
+        <button id="rfidConfirmWrite" class="button primary">确认写入选中标签</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

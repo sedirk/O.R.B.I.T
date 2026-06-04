@@ -1,0 +1,22 @@
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Editor-local settings
+.vscode/
+
+# O.R.B.I.T. runtime captures, AI results, and service logs
+VISION/logs/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+
+# Downloaded driver archives/extractions
+VISION/drivers/
