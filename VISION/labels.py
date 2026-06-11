@@ -91,6 +91,10 @@ def owner_line(placeholder: str = "") -> str:
     return placeholder
 
 
+def owner_home_url() -> str:
+    return environment_value("ORBIT_OWNER_URL") or "https://sedirk.cn"
+
+
 def display_code(item: dict) -> str:
     return rfid_epc_code(item)
 
@@ -292,11 +296,15 @@ def code_label_image(
     code_font = font(18, bold=True)
     draw.rectangle((0, 0, LABEL_W - 1, LABEL_H - 1), outline=0, width=2)
     footer_y = LABEL_H - 30
-    qr_size = 122
-    qr_x = LABEL_W - qr_size - 10
-    qr_y = 7
-    img.paste(qr_image(url, qr_size), (qr_x, qr_y))
-    left_w = qr_x - 16
+    item_qr_size = 112
+    item_qr_x = 132
+    item_qr_y = 7
+    home_qr_size = 54
+    home_qr_x = LABEL_W - home_qr_size - 6
+    home_qr_y = 18
+    img.paste(qr_image(url, item_qr_size), (item_qr_x, item_qr_y))
+    img.paste(qr_image(owner_home_url(), home_qr_size), (home_qr_x, home_qr_y))
+    left_w = item_qr_x - 16
     owner_font = font(13, bold=True)
     owner = owner_line(owner_placeholder)
     if owner:
@@ -310,6 +318,7 @@ def code_label_image(
     img.paste(aruco_image(code, marker_size), (10, marker_y))
     draw.text((66, marker_y + 11), "AR ID", font=tiny, fill=0)
     draw.text((66, marker_y + 28), "物品页 QR", font=tiny, fill=0)
+    draw.text((home_qr_x, home_qr_y + home_qr_size + 3), "sedirk.cn", font=tiny, fill=0)
     draw.line((8, footer_y, LABEL_W - 8, footer_y), fill=0, width=1)
     draw.text((10, LABEL_H - 24), visible_code, font=code_font, fill=0)
     return img
