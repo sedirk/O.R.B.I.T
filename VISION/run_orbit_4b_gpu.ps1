@@ -12,7 +12,7 @@ $env:OLLAMA_NUM_PREDICT = "192"
 $env:OLLAMA_TIMEOUT = "150"
 $env:OLLAMA_API_URL = "http://127.0.0.1:11434/api/chat"
 $env:HOMEBOX_URL = "http://192.168.31.3:3100"
-$env:ORBIT_SCAN_MODE = "scale"
+$env:ORBIT_SCAN_MODE = "auto"
 $env:ORBIT_SCALE_AI_ROTATE = "180"
 $env:ORBIT_EXPOSURE_RETRY = "1"
 $env:ORBIT_EXPOSURE_TARGET_MEAN = "54"
@@ -36,7 +36,7 @@ $env:PYTHONUNBUFFERED = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
 Write-Host "Using gemma3:4b with Vulkan GPU offload: OLLAMA_NUM_GPU=36, OLLAMA_NUM_CTX=2048"
-Write-Host "Default scan mode: scale. Start Ollama first with:"
+Write-Host "Default scan mode: auto. Start Ollama first with:"
 Write-Host "  powershell -ExecutionPolicy Bypass -File .\start_ollama_vulkan.ps1 -Restart"
 
-& $python (Join-Path $PSScriptRoot "main.py") run --mode scale --ollama-model gemma3:4b --ollama-num-gpu 36 --ollama-num-ctx 2048 --ollama-num-predict 192 --ollama-timeout 150 @args
+& $python (Join-Path $PSScriptRoot "main.py") run --mode auto --ollama-model gemma3:4b --ollama-num-gpu 36 --ollama-num-ctx 2048 --ollama-num-predict 192 --ollama-timeout 150 @args

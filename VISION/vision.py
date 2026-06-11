@@ -204,27 +204,51 @@ class IntelligentScanner:
         cv2.putText(panel, label, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (210, 245, 230), 1, cv2.LINE_AA)
         return panel
 
-    def _make_selection_evidence_image(self, selected_crop, context_image=None, selection_bbox=None, aux_image=None):
-        detail = self._resize_to_fit(self._detail_image_for_ai(selected_crop), 920, 620, allow_upscale=True)
-        detail = self._panel(detail, "SELECTED SUBJECT - ENLARGED")
+    def _mark_selection_on_context(self, image, selection_bbox):
+        context = image.copy()
+        if not selection_bbox:
+            return context
+        pixels = self._normalized_bbox_to_pixels(selection_bbox, context.shape[1], context.shape[0])
+        if not pixels:
+            return context
+        x, y, w_box, h_box = pixels
+        overlay = context.copy()
+        cv2.rectangle(overlay, (0, 0), (context.shape[1], context.shape[0]), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (x, y), (x + w_box, y + h_box), (0, 0, 0), -1)
+        context = cv2.addWeighted(context, 1.0, overlay, 0.18, 0)
+        cv2.rectangle(context, (x, y), (x + w_box, y + h_box), (70, 255, 135), 5)
+        cv2.circle(context, (x, y), 10, (70, 255, 135), -1)
+        cv2.circle(context, (x + w_box, y + h_box), 10, (70, 255, 135), -1)
+        cv2.putText(
+            context,
+            "TARGET",
+            (max(6, x), max(24, y - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (70, 255, 135),
+            2,
+            cv2.LINE_AA,
+        )
+        return context
 
-        panels = [detail]
+    def _make_selection_evidence_image(self, selected_crop, context_image=None, selection_bbox=None, aux_image=None):
+        panels = []
         if context_image is not None:
-            context = context_image.copy()
-            if selection_bbox:
-                pixels = self._normalized_bbox_to_pixels(selection_bbox, context.shape[1], context.shape[0])
-                if pixels:
-                    x, y, w_box, h_box = pixels
-                    cv2.rectangle(context, (x, y), (x + w_box, y + h_box), (70, 255, 135), 5)
-                    cv2.circle(context, (x, y), 10, (70, 255, 135), -1)
-                    cv2.circle(context, (x + w_box, y + h_box), 10, (70, 255, 135), -1)
-            context = self._resize_to_fit(self._detail_image_for_ai(context), 920, 500)
-            panels.append(self._panel(context, "FULL TOP VIEW - GREEN BOX"))
+            context = self._mark_selection_on_context(context_image, selection_bbox)
+            context = self._resize_to_fit(self._detail_image_for_ai(context), 980, 560)
+            panels.append(self._panel(context, "FULL TOP VIEW - TARGET IN GREEN BOX"))
 
         if aux_image is not None:
             aux = self._center_crop_image(aux_image, self.aux_camera_center_crop if hasattr(self, "aux_camera_center_crop") else 1.0)
-            aux = self._resize_to_fit(self._detail_image_for_ai(aux), 920, 420)
+            aux = self._resize_to_fit(self._detail_image_for_ai(aux), 980, 420)
             panels.append(self._panel(aux, "SIDE VIEW - CENTER SUBJECT"))
+
+        if selected_crop is not None:
+            detail = self._resize_to_fit(self._detail_image_for_ai(selected_crop), 980, 340, allow_upscale=True)
+            panels.append(self._panel(detail, "GREEN BOX SUBJECT VIEW"))
+
+        if not panels:
+            return selected_crop
 
         gap = 10
         canvas_w = max(panel.shape[1] for panel in panels)
@@ -616,8 +640,8 @@ class IntelligentScanner:
         if context_image is not None:
             ai_image = self._make_selection_evidence_image(image, context_image, selection_bbox=selection_bbox, aux_image=aux_image)
             images = [self.image_to_base64(ai_image)]
-            aux_context = "有。AI 输入是一张证据合成图，包含框选主体放大图、完整俯视上下文，若存在辅助相机则还包含侧视中心主体。"
-            image_rule = "图像是同一物品的证据合成图：优先识别放大的框选主体，并用完整俯视图中的绿色框和侧视中心主体校验结构关系；不要把相机、电子秤、秤盘、桌面或背景作为入库物品。"
+            aux_context = "有。AI 输入是一张证据合成图：第一块是完整俯视图且完整目标物在绿色框内；若存在辅助相机，第二块是同一物品的侧视中心主体；最后一块是绿色框内完整目标物的框选目标视图。"
+            image_rule = "图像是同一物品的证据合成图：绿色框内就是完整待入库物品；优先识别完整俯视图绿色框内的目标物，并用侧视中心主体确认同一物品的形状、厚度和结构；框选目标视图展示的是绿色框内的完整目标物，用于看清该目标物及其标签、文字、接口、材质等细节；不要把相机、电子秤、秤盘、桌面或背景作为入库物品。"
             print(f"🧩 AI 输入使用框选证据合成图: {ai_image.shape[1]}x{ai_image.shape[0]}")
         elif aux_image is not None and self.ai_composite_view:
             ai_image = self._make_ai_composite(image, aux_image)
@@ -1362,16 +1386,80 @@ class IntelligentScanner:
         return rotated
 
     def process_scale_frame(self, full_color, full_depth, color_frame):
-        """Return the full view plus an optional candidate object box for the scale workflow."""
+        """Return the full view plus a candidate box for the scale workflow.
+
+        Reflective trays, sparse depth, cluttered desks, and bright labels can
+        each break a single detector. For a top-down scale bench, collect
+        visual, depth, and color candidates, then score them with general
+        geometry instead of treating any one source as absolute.
+        """
         h_img, w_img = full_color.shape[:2]
         roi_x, roi_y, roi_w, roi_h = self._parse_roi(self.scale_roi, w_img, h_img)
         roi_color = full_color[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
         roi_depth = full_depth[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
 
-        final_x, final_y, final_w, final_h = 0, 0, roi_w, roi_h
+        candidates = []
         bbox_source = "full_roi"
-        measurement_reliable = False
         valid_roi_depths = roi_depth[roi_depth > 0]
+
+        def clamp_global_bbox(x, y, w_box, h_box):
+            x = int(round(x))
+            y = int(round(y))
+            w_box = int(round(w_box))
+            h_box = int(round(h_box))
+            x = max(0, min(x, w_img - 1))
+            y = max(0, min(y, h_img - 1))
+            w_box = max(1, min(w_box, w_img - x))
+            h_box = max(1, min(h_box, h_img - y))
+            return x, y, w_box, h_box
+
+        def add_candidate(source, bbox, origin="roi"):
+            if not bbox:
+                return
+            x, y, w_box, h_box = bbox
+            if origin == "roi":
+                x += roi_x
+                y += roi_y
+            x, y, w_box, h_box = clamp_global_bbox(x, y, w_box, h_box)
+            area_ratio = (w_box * h_box) / max(1, w_img * h_img)
+            if area_ratio < 0.0006:
+                return
+
+            score = self._bbox_score_for_center((x, y, w_box, h_box), w_img, h_img)
+            roi_cx = roi_x + roi_w * 0.5
+            roi_cy = roi_y + roi_h * 0.5
+            cand_cx = x + w_box * 0.5
+            cand_cy = y + h_box * 0.5
+            roi_dist = np.hypot((cand_cx - roi_cx) / max(1, w_img), (cand_cy - roi_cy) / max(1, h_img))
+            score += roi_dist * 0.65
+
+            ix1 = max(x, roi_x)
+            iy1 = max(y, roi_y)
+            ix2 = min(x + w_box, roi_x + roi_w)
+            iy2 = min(y + h_box, roi_y + roi_h)
+            overlap = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            overlap_ratio = overlap / max(1, w_box * h_box)
+            if overlap_ratio <= 0.05:
+                score += 0.28
+            else:
+                score -= min(overlap_ratio, 1.0) * 0.08
+
+            if area_ratio > 0.42:
+                score += 0.50
+            elif area_ratio > 0.26:
+                score += 0.22
+
+            if source == "visual_full":
+                score -= 0.18
+            elif source == "depth_object":
+                score -= 0.04
+            elif source == "color_object":
+                score += 0.04
+
+            candidates.append((score, source, (x, y, w_box, h_box)))
+
+        visual_bbox, _visual_mask = self.get_visual_foreground_bbox(full_color, prefer_center=True)
+        add_candidate("visual_full", visual_bbox, origin="full")
 
         if len(valid_roi_depths) > 100:
             near_depth = np.percentile(valid_roi_depths, 15)
@@ -1381,30 +1469,22 @@ class IntelligentScanner:
             depth_mask = cv2.morphologyEx(depth_mask, cv2.MORPH_OPEN, kernel)
             depth_mask = cv2.morphologyEx(depth_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
             bbox = self.get_scale_object_bbox(depth_mask, roi_w, roi_h)
-            if bbox:
-                final_x, final_y, final_w, final_h = bbox
-                bbox_source = "depth_object"
-                measurement_reliable = True
+            add_candidate("depth_object", bbox, origin="roi")
 
-        if not measurement_reliable:
-            bbox = self.get_scale_color_bbox(roi_color)
-            if bbox:
-                final_x, final_y, final_w, final_h = bbox
-                bbox_source = "color_object"
-                measurement_reliable = True
+        add_candidate("color_object", self.get_scale_color_bbox(roi_color), origin="roi")
 
-        visual_bbox, _visual_mask = self.get_visual_foreground_bbox(roi_color, prefer_center=True)
-        if visual_bbox:
-            visual_score = self._bbox_score_for_center(visual_bbox, roi_w, roi_h)
-            current_score = self._bbox_score_for_center((final_x, final_y, final_w, final_h), roi_w, roi_h) if bbox_source != "full_roi" else float("inf")
-            if bbox_source == "full_roi" or visual_score <= current_score + 0.03:
-                final_x, final_y, final_w, final_h = visual_bbox
-                bbox_source = "visual_foreground"
-                measurement_reliable = True
+        roi_visual_bbox, _roi_visual_mask = self.get_visual_foreground_bbox(roi_color, prefer_center=True)
+        add_candidate("visual_roi", roi_visual_bbox, origin="roi")
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            _score, bbox_source, (global_x, global_y, final_w, final_h) = candidates[0]
+            measurement_reliable = True
+        else:
+            global_x, global_y, final_w, final_h = roi_x, roi_y, roi_w, roi_h
+            measurement_reliable = False
 
         display_image = self._rotate_for_ai(full_color, "scale")
-        global_x = roi_x + final_x
-        global_y = roi_y + final_y
         selection_bbox = None
         if bbox_source != "full_roi":
             selection_bbox = {
@@ -1418,7 +1498,7 @@ class IntelligentScanner:
             }
             selection_bbox = self._rotate_bbox_for_ai(selection_bbox, "scale")
 
-        obj_depth_crop = roi_depth[final_y : final_y + final_h, final_x : final_x + final_w]
+        obj_depth_crop = full_depth[global_y : global_y + final_h, global_x : global_x + final_w]
         valid_depths = obj_depth_crop[obj_depth_crop > 0]
 
         if len(valid_depths) == 0 or not measurement_reliable:
@@ -1539,9 +1619,35 @@ class IntelligentScanner:
 
         p_tl = rs.rs2_deproject_pixel_to_point(intrinsics, [global_x, global_y], front_depth)
         p_br = rs.rs2_deproject_pixel_to_point(intrinsics, [global_x+final_w, global_y+final_h], front_depth)
+        p_img_tl = rs.rs2_deproject_pixel_to_point(intrinsics, [0, 0], front_depth)
+        p_img_br = rs.rs2_deproject_pixel_to_point(intrinsics, [w_img, h_img], front_depth)
 
         real_w = abs(p_br[0] - p_tl[0]) * 1000
         real_h = abs(p_br[1] - p_tl[1]) * 1000
+        frame_w_mm = abs(p_img_br[0] - p_img_tl[0]) * 1000
+        frame_h_mm = abs(p_img_br[1] - p_img_tl[1]) * 1000
+        segmentation_bbox = {
+            "x": global_x,
+            "y": global_y,
+            "w": final_w,
+            "h": final_h,
+            "image_w": w_img,
+            "image_h": h_img,
+            "source": f"visual_{mode}",
+        }
+
+        if mode == "auto":
+            self.last_measurement_meta = {
+                "measurement_reliable": True,
+                "measurement_source": "visual_auto_full_view",
+                "segmentation_bbox": segmentation_bbox,
+                "selection_bbox": segmentation_bbox,
+                "selection_frame_width_mm": frame_w_mm,
+                "selection_frame_height_mm": frame_h_mm,
+                "selection_reference_depth_m": front_depth,
+                "selection_view": "full_d435i",
+            }
+            return full_color, real_w, real_h
 
         # 生成 AI 用的图
         # 把背景涂黑
@@ -1558,15 +1664,7 @@ class IntelligentScanner:
         self.last_measurement_meta = {
             "measurement_reliable": True,
             "measurement_source": f"visual_{mode}",
-            "segmentation_bbox": {
-                "x": global_x,
-                "y": global_y,
-                "w": final_w,
-                "h": final_h,
-                "image_w": w_img,
-                "image_h": h_img,
-                "source": f"visual_{mode}",
-            },
+            "segmentation_bbox": segmentation_bbox,
             "selection_bbox": {
                 "x": 0,
                 "y": 0,
@@ -1588,7 +1686,7 @@ class IntelligentScanner:
         cv2.namedWindow("Viewfinder", cv2.WINDOW_NORMAL)
 
         modes = ["scale", "auto", "full", "macro", "furniture"]
-        preferred_mode = os.getenv("ORBIT_SCAN_MODE", "scale")
+        preferred_mode = os.getenv("ORBIT_SCAN_MODE", "auto")
         mode_idx = modes.index(preferred_mode) if preferred_mode in modes else 0
 
         while True:

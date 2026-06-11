@@ -1,7 +1,9 @@
 import json
+import locale
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,7 +17,7 @@ import requests
 import cv2
 
 from homebox import HomeboxClient, HomeboxError
-from labels import print_item_label_set, rfid_payload
+from labels import display_code, item_url, print_item_label_set, rfid_epc_code, rfid_epc_hex, rfid_payload
 from rfid_e710 import E710Error, E710Reader
 from scale import ElectronicScaleReader
 
@@ -29,6 +31,9 @@ ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = ROOT.parent
 WEB_ROOT = ROOT / "web"
 LOG_DIR = ROOT / "logs"
+INTAKE_RECORD_DIR = ROOT / "intake_records"
+INTAKE_RECORD_SCHEMA = "orbit.intake_record"
+INTAKE_RECORD_VERSION = 1
 
 DEFAULT_HOST = os.getenv("ORBIT_WEB_HOST", "0.0.0.0")
 DEFAULT_PORT = int(os.getenv("ORBIT_WEB_PORT", "8765"))
@@ -43,6 +48,45 @@ def now_ms() -> int:
 
 def json_dumps(data) -> bytes:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def decode_subprocess_output(raw) -> str:
+    if isinstance(raw, str):
+        return raw
+    if not raw:
+        return ""
+    encodings = [
+        "utf-8-sig",
+        "utf-16",
+        locale.getpreferredencoding(False),
+        "gbk",
+        "cp936",
+    ]
+    seen = set()
+    for encoding in encodings:
+        key = str(encoding or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def run_powershell_text(command: str, timeout: int = 8) -> str:
+    prefix = (
+        "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+        "$OutputEncoding=[System.Text.UTF8Encoding]::new($false);"
+    )
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", prefix + command],
+        capture_output=True,
+        text=False,
+        timeout=timeout,
+    )
+    return decode_subprocess_output(completed.stdout).strip()
 
 
 def normalize_ollama_base_url(value: str | None) -> str:
@@ -81,7 +125,7 @@ RUNTIME_CONFIG = {
     "homebox_password": os.getenv("HOMEBOX_PASSWORD", ""),
     "ollama_url": normalize_ollama_chat_url(DEFAULT_OLLAMA_URL),
     "ollama_model": DEFAULT_MODEL,
-    "mode": os.getenv("ORBIT_SCAN_MODE", "scale"),
+    "mode": os.getenv("ORBIT_SCAN_MODE", "auto"),
     "num_predict": os.getenv("OLLAMA_NUM_PREDICT", "192"),
     "image_max_size": os.getenv("ORBIT_AI_IMAGE_MAX_SIZE", "0"),
     "scale_port": os.getenv("SCALE_PORT", "COM9"),
@@ -114,7 +158,7 @@ def public_config(config: dict | None = None) -> dict:
         "homebox_has_password": bool(config.get("homebox_password")),
         "ollama_url": config.get("ollama_url", DEFAULT_OLLAMA_URL),
         "ollama_model": config.get("ollama_model", DEFAULT_MODEL),
-        "mode": config.get("mode", "scale"),
+        "mode": config.get("mode", "auto"),
         "num_predict": config.get("num_predict", "192"),
         "image_max_size": config.get("image_max_size", "0"),
         "scale_port": config.get("scale_port", "COM9"),
@@ -532,7 +576,7 @@ class TaskRunner:
         python = sys.executable
         main_py = str(ROOT / "main.py")
         config = config_snapshot()
-        mode = payload.get("mode") or config.get("mode") or "scale"
+        mode = payload.get("mode") or config.get("mode") or "auto"
         model = payload.get("model") or payload.get("ollama_model") or config.get("ollama_model") or DEFAULT_MODEL
         num_predict = str(payload.get("num_predict") or config.get("num_predict") or "192")
         homebox_url = str(payload.get("homebox_url") or config.get("homebox_url") or DEFAULT_HOMEBOX_URL).rstrip("/")
@@ -574,7 +618,7 @@ class TaskRunner:
             command.append("--dry-run")
             if weight is not None:
                 command.extend(["--weight-g", str(weight)])
-            return command, "识别待确认"
+            return command, "识别物品"
 
         if action == "identify_selection":
             image_name = Path(str(payload.get("image_name") or "")).name
@@ -601,7 +645,7 @@ class TaskRunner:
                 weight = scale_status.get("weight_g")
             if weight is not None:
                 command.extend(["--weight-g", str(weight)])
-            return command, "识别待确认"
+            return command, "识别物品"
 
         if action == "diagnose":
             return [python, main_py, "diagnose", "--dry-run", *common], "系统诊断"
@@ -881,7 +925,7 @@ class TaskRunner:
     def discard_pending(self):
         with self.lock:
             self.pending_item = None
-        return True, "已丢弃待确认物品"
+        return True, "已清除待确认物品"
 
     def commit_pending(self, edited: dict):
         with self.lock:
@@ -922,20 +966,34 @@ class TaskRunner:
 
         image = None
         image_path = Path(pending.get("image_path") or "")
-        if image_path.exists():
+        if image_path.is_file():
             image = cv2.imread(str(image_path))
 
         try:
             client = runtime_homebox_client()
             if not client.authenticated:
                 return False, "缺少 Homebox 登录信息：请设置 HOMEBOX_TOKEN 或 HOMEBOX_USERNAME/HOMEBOX_PASSWORD", None
+            location_name = str(ai.get("suggested_location") or "").strip()
+            allow_create_location = bool(fields.get("create_missing_location"))
             try:
-                location_id = client.resolve_location_id_exact(ai.get("suggested_location"))
+                location_id = client.resolve_location_id_exact(location_name)
             except HomeboxError as exc:
                 location_id = None
                 with self.lock:
                     if self.task:
                         self.task.setdefault("logs", []).append(f"Homebox location exact match skipped: {exc}")
+            if location_name and not location_id:
+                if not allow_create_location:
+                    return False, f"Homebox 位置不存在: {location_name}。请选择已有位置，或确认创建新位置后再入库。", {
+                        "missing_location": location_name,
+                    }
+                location = client.create_location(location_name, description="Created by O.R.B.I.T.")
+                location_id = location.get("id") if isinstance(location, dict) else None
+                if not location_id:
+                    return False, f"Homebox 新位置创建失败: {location_name}", None
+                with self.lock:
+                    if self.task:
+                        self.task.setdefault("logs", []).append(f"Homebox location created: {location_name} ({location_id})")
             item = client.create_item(
                 ai,
                 image_cv2=image,
@@ -959,6 +1017,8 @@ class TaskRunner:
                 self.pending_item["committed_at"] = now_ms()
             if self.task:
                 self.task.setdefault("logs", []).append(f"Homebox item committed: {stored_item.get('id')}")
+        record_ok, record_message, _record_meta = self.save_intake_record_for_pending("homebox_commit")
+        return True, f"入库完成，可继续写标签；{record_message}", stored_item
         return True, "入库完成，可继续写标签", stored_item
 
     def write_labels_for_pending(self, options: dict | None = None):
@@ -1025,9 +1085,45 @@ class TaskRunner:
             if self.task:
                 self.task.setdefault("logs", []).append(f"label/write result: {json.dumps(result, ensure_ascii=False)}")
 
+        if not errors:
+            record_ok, record_message, _record_meta = self.save_intake_record_for_pending("label_write")
+            return True, f"写标签完成；{record_message}", result
+
         if errors:
             return False, "；".join(errors), result
         return True, "写标签完成", result
+
+    def label_preview_for_pending(self):
+        with self.lock:
+            pending = json.loads(json.dumps(self.pending_item, ensure_ascii=False)) if self.pending_item else None
+        if not pending:
+            return False, "没有待预览物品", None
+        item = pending.get("committed_item")
+        if not item:
+            return False, "请先入库，再预览标签", None
+
+        ai = pending.get("ai") or {}
+        measurement = pending.get("measurement") or {}
+        config = config_snapshot()
+        try:
+            preview = print_item_label_set(
+                item,
+                ai=ai,
+                measurement=measurement,
+                homebox_url=config.get("homebox_url", DEFAULT_HOMEBOX_URL),
+                printer_name=os.getenv("ORBIT_LABEL_PRINTER", "TSC TTP-244 Pro"),
+                dry_run=True,
+            )
+            for key in ("human_preview", "code_preview"):
+                if preview.get(key):
+                    preview[f"{key}_name"] = Path(preview[key]).name
+        except Exception as exc:
+            return False, f"标签预览失败: {exc}", None
+
+        with self.lock:
+            if self.pending_item and self.pending_item.get("id") == pending.get("id"):
+                self.pending_item["label_preview"] = preview
+        return True, "标签预览已生成", preview
 
 
     def rfid_payload_for_pending(self):
@@ -1037,6 +1133,273 @@ class TaskRunner:
             return None
         config = config_snapshot()
         return rfid_payload(pending["committed_item"], config.get("homebox_url", DEFAULT_HOMEBOX_URL))
+
+    def save_intake_record_for_pending(self, reason: str = "manual"):
+        with self.lock:
+            pending = json.loads(json.dumps(self.pending_item, ensure_ascii=False)) if self.pending_item else None
+        if not pending:
+            return False, "没有可保存的入库状态", None
+        try:
+            record, path = self._write_intake_record(pending, reason=reason)
+        except Exception as exc:
+            return False, f"入库记录保存失败: {exc}", None
+
+        meta = {
+            "path": str(path),
+            "name": path.name,
+            "record_id": record.get("record_id"),
+            "schema_version": record.get("schema_version"),
+            "saved_at": record.get("created_at"),
+            "reason": reason,
+        }
+        with self.lock:
+            if self.pending_item and self.pending_item.get("id") == pending.get("id"):
+                self.pending_item["intake_record"] = meta
+            if self.task:
+                self.task.setdefault("logs", []).append(f"intake record saved: {path}")
+        return True, f"入库记录已保存: {path.name}", meta
+
+    def import_intake_record(self, record: dict):
+        if not isinstance(record, dict):
+            return False, "导入失败：文件不是 JSON 对象", None
+        schema = record.get("schema") or ""
+        version = int(record.get("schema_version") or 0)
+        if schema and schema != INTAKE_RECORD_SCHEMA:
+            return False, f"导入失败：不支持的记录类型 {schema}", None
+        if version and int(record.get("min_reader_schema_version") or 1) > INTAKE_RECORD_VERSION:
+            return False, "导入失败：记录需要更新版本的 O.R.B.I.T. 才能读取", None
+
+        pending = (
+            (record.get("gui") or {}).get("pending_item")
+            or record.get("pending_item")
+            or record.get("payload", {}).get("pending_item")
+        )
+        if not isinstance(pending, dict):
+            return False, "导入失败：记录中没有 pending_item", None
+
+        pending = self._normalize_imported_pending(pending, record)
+        with self.lock:
+            self._reap_stale_task_locked()
+            if self.task and self.task.get("running"):
+                return False, "当前还有任务运行中，不能导入记录", None
+            self.pending_item = pending
+            self.task = {
+                "id": str(uuid.uuid4())[:8],
+                "action": "import_record",
+                "label": "导入入库记录",
+                "timeout_seconds": 0,
+                "timed_out": False,
+                "running": False,
+                "returncode": 0,
+                "started_at": now_ms(),
+                "finished_at": now_ms(),
+                "logs": [f"imported intake record: {record.get('record_id') or pending.get('id')}"],
+                "latest_image": pending.get("source_image_name") or pending.get("image_name"),
+                "latest_aux_image": pending.get("aux_image_name"),
+                "latest_result": pending.get("result_name"),
+                "latest_selection": self._selection_from_pending(pending),
+                "request_selection": None,
+                "error": None,
+            }
+        return True, f"已导入入库记录: {pending.get('editable', {}).get('name') or pending.get('id')}", pending
+
+    def _write_intake_record(self, pending: dict, reason: str):
+        INTAKE_RECORD_DIR.mkdir(parents=True, exist_ok=True)
+        record = self._build_intake_record(pending, reason=reason)
+        summary = record.get("summary") or {}
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        name = self._safe_filename(summary.get("name") or "item")[:40]
+        key = self._safe_filename(summary.get("code") or summary.get("item_id") or record["record_id"])[:48]
+        path = INTAKE_RECORD_DIR / f"{stamp}_{name}_{key}.orbit-intake.json"
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        return record, path
+
+    def _build_intake_record(self, pending: dict, reason: str):
+        pending = json.loads(json.dumps(pending, ensure_ascii=False))
+        config = config_snapshot()
+        item = pending.get("committed_item") or {}
+        ai = pending.get("ai") or {}
+        editable = pending.get("editable") or {}
+        name = editable.get("name") or ai.get("name") or item.get("name") or pending.get("id") or "item"
+        item_id = str(item.get("id") or "")
+        try:
+            code = rfid_epc_code(item) if item else ""
+        except Exception:
+            code = str(item.get("assetId") or item.get("asset_id") or "")
+        summary = {
+            "name": str(name),
+            "item_id": item_id,
+            "code": code,
+            "homebox_url": config.get("homebox_url", DEFAULT_HOMEBOX_URL),
+            "item_url": item_url(config.get("homebox_url", DEFAULT_HOMEBOX_URL), item) if item else "",
+            "committed_at": pending.get("committed_at"),
+            "labeled_at": pending.get("labeled_at"),
+        }
+        payloads = {}
+        if item:
+            try:
+                payloads["rfid"] = rfid_payload(item, config.get("homebox_url", DEFAULT_HOMEBOX_URL))
+            except Exception:
+                payloads["rfid"] = None
+        return {
+            "schema": INTAKE_RECORD_SCHEMA,
+            "schema_version": INTAKE_RECORD_VERSION,
+            "min_reader_schema_version": 1,
+            "record_id": str(uuid.uuid4()),
+            "created_at": now_ms(),
+            "reason": reason,
+            "summary": summary,
+            "gui": {
+                "config_public": public_config(config),
+                "pending_item": pending,
+                "task": self._public_task_snapshot_for_record(),
+                "scale": scale_monitor.snapshot() if "scale_monitor" in globals() else None,
+                "system": status_probe.snapshot() if "status_probe" in globals() else None,
+            },
+            "payloads": payloads,
+            "artifacts": self._artifact_manifest(pending),
+        }
+
+    def _public_task_snapshot_for_record(self):
+        with self.lock:
+            if not self.task:
+                return None
+            task = json.loads(json.dumps(self.task, ensure_ascii=False))
+        task.pop("pending_item", None)
+        task["logs"] = list(task.get("logs") or [])[-120:]
+        return task
+
+    def _artifact_manifest(self, pending: dict):
+        artifacts = {}
+        for key in ("result_path", "image_path", "source_image_path", "aux_image_path"):
+            meta = self._file_meta(pending.get(key))
+            if meta:
+                artifacts[key] = meta
+        for group_name in ("label_preview", "label_result"):
+            group = pending.get(group_name) if isinstance(pending.get(group_name), dict) else {}
+            for key in ("human_preview", "code_preview", "human_label", "code_label"):
+                meta = self._file_meta(group.get(key))
+                if meta:
+                    artifacts[f"{group_name}.{key}"] = meta
+        return artifacts
+
+    @staticmethod
+    def _file_meta(path_value):
+        if not path_value:
+            return None
+        path = Path(str(path_value))
+        meta = {"path": str(path), "name": path.name}
+        try:
+            if path.is_file():
+                stat = path.stat()
+                meta.update({"exists": True, "size": stat.st_size, "mtime": int(stat.st_mtime * 1000)})
+            else:
+                meta["exists"] = False
+        except Exception:
+            meta["exists"] = False
+        return meta
+
+    @staticmethod
+    def _safe_filename(value):
+        text = re.sub(r'[\\/:*?"<>|\s]+', "_", str(value or "").strip()).strip("._")
+        return text or "item"
+
+    def _normalize_imported_pending(self, pending: dict, record: dict):
+        pending = json.loads(json.dumps(pending, ensure_ascii=False))
+        pending.setdefault("id", (record.get("summary") or {}).get("item_id") or record.get("record_id") or str(uuid.uuid4())[:8])
+        ai = pending.setdefault("ai", {})
+        measurement = pending.setdefault("measurement", {})
+        editable = pending.get("editable")
+        if not isinstance(editable, dict):
+            editable = {
+                "name": ai.get("name") or "",
+                "category": ai.get("category") or "",
+                "manufacturer": ai.get("manufacturer") or "",
+                "model": ai.get("model") or "",
+                "quantity": ai.get("quantity") or 1,
+                "tags": ", ".join([str(t) for t in (ai.get("tags") or [])]) if isinstance(ai.get("tags"), list) else str(ai.get("tags") or ""),
+                "suggested_location": ai.get("suggested_location") or "",
+                "description": ai.get("description") or "",
+                "reasoning": ai.get("reasoning") or "",
+                "size": ai.get("size") or "",
+                "width_mm": measurement.get("width_mm"),
+                "height_mm": measurement.get("height_mm"),
+                "weight_g": measurement.get("weight_g"),
+            }
+            pending["editable"] = editable
+        pending["imported_record"] = {
+            "schema": record.get("schema") or INTAKE_RECORD_SCHEMA,
+            "schema_version": record.get("schema_version") or 0,
+            "record_id": record.get("record_id"),
+            "imported_at": now_ms(),
+            "summary": record.get("summary") or {},
+        }
+        self._restore_imported_artifact_names(pending, record)
+        return pending
+
+    def _restore_imported_artifact_names(self, pending: dict, record: dict):
+        artifacts = record.get("artifacts") if isinstance(record.get("artifacts"), dict) else {}
+        for pending_key in ("source_image_path", "image_path", "aux_image_path", "result_path"):
+            path_value = pending.get(pending_key)
+            if not path_value:
+                meta = artifacts.get(pending_key) or {}
+                path_value = meta.get("path")
+            restored = self._restore_path_for_gui(path_value)
+            if restored:
+                pending[pending_key] = restored["path"]
+                if pending_key == "source_image_path":
+                    pending["source_image_name"] = restored["name"]
+                elif pending_key == "image_path":
+                    pending["image_name"] = restored["name"]
+                elif pending_key == "aux_image_path":
+                    pending["aux_image_name"] = restored["name"]
+                elif pending_key == "result_path":
+                    pending["result_name"] = restored["name"]
+
+    @staticmethod
+    def _restore_path_for_gui(path_value):
+        if not path_value:
+            return None
+        path = Path(str(path_value))
+        if not path.is_file():
+            return None
+        try:
+            if path.resolve().parent == LOG_DIR.resolve():
+                return {"path": str(path.resolve()), "name": path.name}
+        except Exception:
+            pass
+        try:
+            LOG_DIR.mkdir(exist_ok=True)
+            target = LOG_DIR / f"restored_{int(time.time())}_{path.name}"
+            shutil.copy2(path, target)
+            return {"path": str(target), "name": target.name}
+        except Exception:
+            return None
+
+    def _selection_from_pending(self, pending: dict):
+        bbox = (pending.get("measurement") or {}).get("selection_bbox")
+        if not isinstance(bbox, dict):
+            return None
+        try:
+            x = float(bbox.get("x") or 0)
+            y = float(bbox.get("y") or 0)
+            w = float(bbox.get("w") or 1)
+            h = float(bbox.get("h") or 1)
+            image_w = float(bbox.get("image_w") or 0)
+            image_h = float(bbox.get("image_h") or 0)
+            if x > 1 or y > 1 or w > 1 or h > 1:
+                if image_w <= 0 or image_h <= 0:
+                    return None
+                x, y, w, h = x / image_w, y / image_h, w / image_w, h / image_h
+            return {
+                "x": max(0.0, min(0.99, x)),
+                "y": max(0.0, min(0.99, y)),
+                "w": max(0.01, min(1.0 - max(0.0, min(0.99, x)), w)),
+                "h": max(0.01, min(1.0 - max(0.0, min(0.99, y)), h)),
+                "source": bbox.get("source") or "imported",
+            }
+        except Exception:
+            return None
 
 
 class StatusProbe:
@@ -1138,15 +1501,7 @@ class StatusProbe:
             "ConvertTo-Json -Compress"
         )
         try:
-            completed = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", command],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-            )
-            raw = completed.stdout.strip()
+            raw = run_powershell_text(command, timeout=5)
             if not raw:
                 return []
             data = json.loads(raw)
@@ -1254,15 +1609,7 @@ class StatusProbe:
             "ConvertTo-Json -Compress"
         )
         try:
-            completed = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", command],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-            )
-            raw = completed.stdout.strip()
+            raw = run_powershell_text(command, timeout=5)
             if not raw:
                 return []
             data = json.loads(raw)
@@ -1336,6 +1683,31 @@ class OrbitHandler(SimpleHTTPRequestHandler):
                 {"ok": ok, "message": message, "result": result, "task": task_runner.snapshot()},
                 200 if ok else 409,
             )
+        if parsed.path == "/api/label_preview":
+            ok, message, preview = task_runner.label_preview_for_pending()
+            return self._json(
+                {"ok": ok, "message": message, "preview": preview, "task": task_runner.snapshot()},
+                200 if ok else 409,
+            )
+        if parsed.path == "/api/save_intake_record":
+            ok, message, record = task_runner.save_intake_record_for_pending(payload.get("reason") or "manual")
+            return self._json(
+                {"ok": ok, "message": message, "record": record, "task": task_runner.snapshot()},
+                200 if ok else 409,
+            )
+        if parsed.path == "/api/import_intake_record":
+            ok, message, pending = task_runner.import_intake_record(payload.get("record") or payload)
+            return self._json(
+                {"ok": ok, "message": message, "pending_item": pending, "task": task_runner.snapshot()},
+                200 if ok else 409,
+            )
+        if parsed.path == "/api/find/search":
+            return self._json(self._find_search(payload))
+        if parsed.path == "/api/find/item":
+            return self._json(self._find_item(payload))
+        if parsed.path == "/api/find/rfid":
+            config, _scale_changed = update_runtime_config(payload)
+            return self._json(self._find_rfid(config))
         if parsed.path == "/api/discard_pending":
             ok, message = task_runner.discard_pending()
             return self._json({"ok": ok, "message": message, "task": task_runner.snapshot()})
@@ -1343,10 +1715,14 @@ class OrbitHandler(SimpleHTTPRequestHandler):
             ok, message = task_runner.load_pending_from_result(payload.get("result_name", ""))
             return self._json({"ok": ok, "message": message, "task": task_runner.snapshot()}, 200 if ok else 409)
         if parsed.path == "/api/rfid/probe":
-            return self._json(self._rfid_probe())
+            config, _scale_changed = update_runtime_config(payload)
+            return self._json(self._rfid_probe(config))
         if parsed.path == "/api/rfid/inventory":
             config, _scale_changed = update_runtime_config(payload)
             return self._json(self._rfid_inventory(config))
+        if parsed.path == "/api/rfid/release":
+            config, _scale_changed = update_runtime_config(payload)
+            return self._json(self._rfid_release(config))
         if parsed.path == "/api/camera/probe":
             config, _scale_changed = update_runtime_config(payload)
             return self._json(self._camera_probe(config))
@@ -1416,6 +1792,171 @@ class OrbitHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             return {"ok": False, "message": f"Homebox 读取异常: {exc}", "tags": [], "locations": []}
 
+    def _find_search(self, payload: dict):
+        query = str(payload.get("q") or "").strip()
+        limit = max(5, min(100, int(payload.get("limit") or 40)))
+        try:
+            client = runtime_homebox_client(timeout=12)
+            if not client.authenticated:
+                return {"ok": False, "message": "缺少 Homebox 登录信息，无法搜索物品", "items": []}
+
+            primary = self._homebox_items_from_response(client.list_items(query or None, page_size=limit))
+            combined = {str(item.get("id") or idx): item for idx, item in enumerate(primary)}
+            if query:
+                broad = self._homebox_items_from_response(client.list_items(None, page_size=max(limit, 100)))
+                for item in broad:
+                    if self._item_matches_query(item, query):
+                        combined[str(item.get("id") or len(combined))] = item
+            items = [self._summarize_homebox_item(item) for item in combined.values()]
+            if query:
+                items.sort(key=lambda item: self._find_score(item, query), reverse=True)
+            return {
+                "ok": True,
+                "message": f"找到 {len(items[:limit])} 个物品" if query else f"读取 {len(items[:limit])} 个物品",
+                "items": items[:limit],
+            }
+        except HomeboxError as exc:
+            return {"ok": False, "message": f"Homebox 搜索失败: {exc}", "items": []}
+        except Exception as exc:
+            return {"ok": False, "message": f"找物搜索异常: {exc}", "items": []}
+
+    def _find_item(self, payload: dict):
+        item_id = str(payload.get("id") or "").strip()
+        if not item_id:
+            return {"ok": False, "message": "缺少物品 ID"}
+        try:
+            client = runtime_homebox_client(timeout=12)
+            if not client.authenticated:
+                return {"ok": False, "message": "缺少 Homebox 登录信息，无法读取物品"}
+            item = client.get_item(item_id)
+            return {"ok": True, "item": self._summarize_homebox_item(item, detail=True)}
+        except HomeboxError as exc:
+            return {"ok": False, "message": f"Homebox 读取失败: {exc}"}
+        except Exception as exc:
+            return {"ok": False, "message": f"物品读取异常: {exc}"}
+
+    def _find_rfid(self, config: dict):
+        inventory = self._rfid_inventory(config)
+        if not inventory.get("ok"):
+            return {"ok": False, "message": inventory.get("message") or "RFID 盘点失败", "tags": []}
+        try:
+            client = runtime_homebox_client(timeout=12)
+            items = self._homebox_items_from_response(client.list_items(None, page_size=200)) if client.authenticated else []
+        except Exception:
+            items = []
+
+        by_code = {}
+        by_hex = {}
+        for item in items:
+            summary = self._summarize_homebox_item(item)
+            by_code[summary["rfid_code"].upper()] = summary
+            by_hex[rfid_epc_hex(item).upper()] = summary
+
+        matched = []
+        for tag in inventory.get("tags") or []:
+            tag_epc = str(tag.get("epc") or "").upper()
+            tag_ascii = str(tag.get("epc_ascii") or "").strip().upper()
+            item = by_hex.get(tag_epc) or by_code.get(tag_ascii)
+            row = dict(tag)
+            row["item"] = item
+            row["matched"] = item is not None
+            matched.append(row)
+        return {
+            "ok": True,
+            "message": f"{inventory.get('port')} 读到 {len(matched)} 个 RFID 标签，匹配 {sum(1 for row in matched if row.get('matched'))} 个物品",
+            "port": inventory.get("port"),
+            "tags": matched,
+        }
+
+    @staticmethod
+    def _homebox_items_from_response(response):
+        if isinstance(response, list):
+            return response
+        if not isinstance(response, dict):
+            return []
+        for key in ("items", "data", "results", "rows"):
+            value = response.get(key)
+            if isinstance(value, list):
+                return value
+        if isinstance(response.get("item"), list):
+            return response["item"]
+        return []
+
+    def _summarize_homebox_item(self, item: dict, detail: bool = False):
+        location = item.get("location") if isinstance(item.get("location"), dict) else {}
+        tags = item.get("tags") or item.get("labels") or []
+        tag_names = []
+        for tag in tags if isinstance(tags, list) else []:
+            if isinstance(tag, dict):
+                name = tag.get("name")
+            else:
+                name = tag
+            if name:
+                tag_names.append(str(name))
+        fields = item.get("fields") if isinstance(item.get("fields"), list) else []
+        field_rows = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            value = field.get("textValue") or field.get("numberValue") or field.get("value") or ""
+            field_rows.append({"name": str(field.get("name") or ""), "value": str(value)})
+        summary = {
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or "未命名物品"),
+            "code": display_code(item),
+            "rfid_code": rfid_epc_code(item),
+            "url": item_url(config_snapshot().get("homebox_url", DEFAULT_HOMEBOX_URL), item),
+            "location": str(item.get("locationName") or location.get("name") or ""),
+            "tags": tag_names,
+            "manufacturer": str(item.get("manufacturer") or ""),
+            "model": str(item.get("modelNumber") or item.get("model") or ""),
+            "quantity": item.get("quantity"),
+            "description": str(item.get("description") or ""),
+        }
+        if detail:
+            summary["notes"] = str(item.get("notes") or "")
+            summary["fields"] = field_rows
+            summary["raw_keys"] = sorted(str(key) for key in item.keys())
+        return summary
+
+    @staticmethod
+    def _item_matches_query(item: dict, query: str) -> bool:
+        needle = query.casefold()
+        if not needle:
+            return True
+        text = " ".join(
+            str(value)
+            for value in (
+                item.get("id"),
+                item.get("assetId"),
+                item.get("name"),
+                item.get("description"),
+                item.get("manufacturer"),
+                item.get("modelNumber"),
+                item.get("locationName"),
+                rfid_epc_code(item),
+                display_code(item),
+            )
+            if value
+        ).casefold()
+        return needle in text
+
+    @staticmethod
+    def _find_score(item: dict, query: str) -> int:
+        needle = query.casefold()
+        name = item.get("name", "").casefold()
+        code = item.get("code", "").casefold()
+        rfid_code = item.get("rfid_code", "").casefold()
+        hay = " ".join(str(item.get(key) or "") for key in ("name", "description", "location", "manufacturer", "model", "code", "rfid_code")).casefold()
+        score = 0
+        if needle == code or needle == rfid_code:
+            score += 100
+        if needle and needle in name:
+            score += 60
+        if needle and needle in hay:
+            score += 20
+        return score
+
     @staticmethod
     def _homebox_name_options(rows):
         names = []
@@ -1470,18 +2011,21 @@ class OrbitHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def _selected_rfid_port(self, rfid: dict | None = None):
+    def _selected_rfid_port(self, rfid: dict | None = None, config: dict | None = None):
         rfid = rfid or status_probe.snapshot().get("rfid") or {}
-        configured = (config_snapshot().get("rfid_port") or "").upper()
+        configured = str((config or config_snapshot()).get("rfid_port") or "").strip()
+        if configured and configured.lower() not in {"auto", "--"}:
+            return configured
+        configured = configured.upper()
         ports = rfid.get("ports") or []
         selected = next((item for item in ports if item.get("device", "").upper() == configured), None)
         return (selected or (ports or [{}])[0]).get("device")
 
     def _rfid_inventory(self, config: dict):
         rfid = status_probe.snapshot().get("rfid") or {}
-        if not rfid.get("available"):
+        if not rfid.get("available") and not str(config.get("rfid_port") or "").strip():
             return {"ok": False, "message": rfid.get("message") or "未检测到可用 RFID 串口", "tags": []}
-        port = self._selected_rfid_port(rfid)
+        port = self._selected_rfid_port(rfid, config)
         if not port:
             return {"ok": False, "message": "没有可打开的 RFID 串口", "tags": []}
         try:
@@ -1505,11 +2049,11 @@ class OrbitHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             return {"ok": False, "message": f"{port} RFID 盘点失败: {exc}", "tags": []}
 
-    def _rfid_probe(self):
+    def _rfid_probe(self, config: dict | None = None):
         rfid = status_probe.snapshot().get("rfid") or {}
-        if not rfid.get("available"):
+        if not rfid.get("available") and not str((config or {}).get("rfid_port") or "").strip():
             return {"ok": False, "message": f"不能控制 RFID：{rfid.get('message', '未检测到可用设备')}", "rfid": rfid}
-        port = self._selected_rfid_port(rfid)
+        port = self._selected_rfid_port(rfid, config)
         if not port:
             return {"ok": False, "message": "不能控制 RFID：没有可打开的串口", "rfid": rfid}
         try:
@@ -1536,6 +2080,108 @@ class OrbitHandler(SimpleHTTPRequestHandler):
             return {"ok": False, "message": f"{port} E710 探测失败：{exc}", "rfid": rfid}
         except Exception as exc:
             return {"ok": False, "message": f"{port} RFID 探测异常：{exc}", "rfid": rfid}
+
+    def _rfid_release(self, config: dict):
+        rfid = status_probe.snapshot().get("rfid") or {}
+        port = self._selected_rfid_port(rfid, config)
+        if not port:
+            return {"ok": False, "message": "未选择 RFID 串口"}
+
+        baud = int(os.getenv("RFID_BAUD", "115200"))
+        before_ok, before_error = self._test_rfid_port_open(port, baud)
+        if before_ok:
+            return {
+                "ok": True,
+                "message": f"{port} 当前可以打开，无需释放",
+                "port": port,
+                "killed": [],
+            }
+
+        candidates = self._orbit_process_candidates(port)
+        killed = []
+        for proc in candidates:
+            pid = int(proc.get("pid") or 0)
+            if not pid:
+                continue
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                killed.append(proc)
+            except Exception as exc:
+                proc["kill_error"] = str(exc)
+
+        time.sleep(0.6)
+        after_ok, after_error = self._test_rfid_port_open(port, baud)
+        if after_ok:
+            message = f"{port} 已释放，可打开；结束了 {len(killed)} 个 O.R.B.I.T. 子进程"
+        elif killed:
+            message = f"{port} 仍无法打开；已结束 {len(killed)} 个 O.R.B.I.T. 子进程，可能被外部串口工具占用"
+        else:
+            message = f"{port} 无法打开，且没有发现可安全结束的 O.R.B.I.T. 子进程"
+        return {
+            "ok": after_ok,
+            "message": message,
+            "port": port,
+            "killed": killed,
+            "before_error": before_error,
+            "after_error": after_error,
+        }
+
+    @staticmethod
+    def _test_rfid_port_open(port: str, baud: int):
+        try:
+            with E710Reader(port=port, baudrate=baud):
+                pass
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
+
+    @staticmethod
+    def _orbit_process_candidates(port: str):
+        if os.name != "nt":
+            return []
+        project_root = str(PROJECT_ROOT).lower()
+        port_text = str(port or "").lower()
+        script = f"""
+$root = {json.dumps(project_root)}
+$port = {json.dumps(port_text)}
+$selfPid = {os.getpid()}
+Get-CimInstance Win32_Process | Where-Object {{
+  $_.ProcessId -ne $selfPid -and $_.CommandLine -and
+  (
+    $_.CommandLine.ToLower().Contains($root) -or
+    $_.CommandLine.ToLower().Contains('\\vision\\')
+  ) -and
+  (
+    $_.CommandLine.ToLower().Contains($port) -or
+    $_.CommandLine.ToLower().Contains('rfid') -or
+    $_.CommandLine.ToLower().Contains('e710') -or
+    $_.CommandLine.ToLower().Contains('main.py') -or
+    $_.CommandLine.ToLower().Contains('web_gui.py')
+  )
+}} | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress
+"""
+        try:
+            raw = run_powershell_text(script, timeout=8)
+            if not raw:
+                return []
+            data = json.loads(raw)
+            rows = data if isinstance(data, list) else [data]
+            return [
+                {
+                    "pid": int(row.get("ProcessId") or 0),
+                    "name": str(row.get("Name") or ""),
+                    "command": str(row.get("CommandLine") or "")[:220],
+                }
+                for row in rows
+                if row.get("ProcessId")
+            ]
+        except Exception:
+            return []
 
     def _camera_probe(self, config: dict):
         if config_bool(config.get("aux_camera_enabled"), "1") != "1":

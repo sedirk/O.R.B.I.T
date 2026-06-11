@@ -24,6 +24,11 @@ const state = {
   homeboxLocations: [],
   homeboxConfigDirty: false,
   rfidInventory: null,
+  labelPreview: null,
+  appMode: "intake",
+  findRows: [],
+  findSelectedIndex: null,
+  findSelectedUrl: "",
 };
 
 let configSaveTimer = null;
@@ -94,8 +99,18 @@ function setBusy(running) {
   });
   $("identifySelection").disabled = running || !state.lastImage;
   $("scanWrite").disabled = running || !state.hasPending || state.hasCommitted;
+  $("labelPreviewButton").disabled = running || !state.hasCommitted;
   $("labelWrite").disabled = running || !state.hasCommitted;
   $("cancel").disabled = !running;
+}
+
+function setAppMode(mode) {
+  state.appMode = mode === "find" ? "find" : "intake";
+  $("intakePanel").hidden = state.appMode !== "intake";
+  $("finderPanel").hidden = state.appMode !== "find";
+  document.querySelectorAll("[data-app-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.appMode === state.appMode);
+  });
 }
 
 function render(payload) {
@@ -107,6 +122,7 @@ function render(payload) {
   setText("modelName", `${$("model").value || config.ollama_model || "--"} @ ${ollamaBaseUrl()}`);
   setText("ollamaEndpoint", ollamaBaseUrl());
   setText("homeboxUrl", config.homebox_url || "--");
+  setText("findProfile", `${config.homebox_url || "Homebox"} · ${systemLabel(payload.system?.rfid?.available ? "RFID 可用" : "RFID 未就绪")}`);
 
   const scale = payload.scale || {};
   $("weight").textContent = fmtWeight(scale.weight_g);
@@ -140,6 +156,20 @@ function render(payload) {
   const pending = task.pending_item || null;
   renderTask(task, pending);
   renderPending(pending, task);
+}
+
+function systemLabel(text) {
+  return text || "--";
+}
+
+function modeLabel(value) {
+  return {
+    auto: "自动",
+    scale: "称重台",
+    macro: "微距",
+    full: "全图",
+    furniture: "大件",
+  }[value] || value || "--";
 }
 
 function renderDevices(system, scale) {
@@ -195,7 +225,7 @@ function renderModuleStatus(system, scale, config, task) {
   setText("modelName", `${$("model").value || config.ollama_model || "--"} @ ${ollamaBaseUrl()}`);
   const imageSize = Number(fieldValue("imageSize", config.image_max_size ?? 0));
   const imageText = imageSize > 0 ? `${imageSize}px` : "原图";
-  setText("intakeProfile", `${fieldValue("mode", config.mode || "scale")} · ${$("model").value || config.ollama_model || "--"} · ${imageText}`);
+  setText("intakeProfile", `${modeLabel(fieldValue("mode", config.mode || "auto"))} · ${$("model").value || config.ollama_model || "--"} · ${imageText}`);
 
   populatePortSelect("scalePort", serialPorts, scale.port || config.scale_port || "auto", true);
   const configuredRfid = config.rfid_port || (rfid.ports || [])[0]?.device || "";
@@ -367,14 +397,17 @@ function renderPending(pending, task = {}) {
   state.hasCommitted = !!pending?.committed_item;
   const running = $("cancel").disabled === false;
   $("scanWrite").disabled = running || !pending || state.hasCommitted;
+  $("labelPreviewButton").disabled = running || !state.hasCommitted;
   $("labelWrite").disabled = running || !state.hasCommitted;
   $("discardPending").disabled = running || !pending;
 
   if (!pending) {
     state.pendingId = null;
     state.hasCommitted = false;
+    state.labelPreview = null;
     $("editorStatus").textContent = "识别后可编辑";
-    setEditorEnabled(false);
+    setEditorEnabled(false, true);
+    renderLabelPreview(null);
     return;
   }
 
@@ -388,6 +421,7 @@ function renderPending(pending, task = {}) {
   }
   showLogImage("auxPreview", "emptyAuxPreview", pending.aux_image_name, "lastAuxImage");
   if (pending.result_name) state.lastResult = pending.result_name;
+  renderLabelPreview(pending.label_preview || pending.label_result || (state.pendingId === pending.id ? state.labelPreview : null));
   if (state.pendingId === pending.id) return;
   state.pendingId = pending.id;
 
@@ -583,7 +617,7 @@ function sizeFromMeasurement(editable) {
   return `${w.toFixed(1)}mm x ${h.toFixed(1)}mm`;
 }
 
-function setEditorEnabled(enabled) {
+function setEditorEnabled(enabled, clearValues = false) {
   [
     "fieldName",
     "fieldCategory",
@@ -598,12 +632,12 @@ function setEditorEnabled(enabled) {
     "fieldReasoning",
   ].forEach((id) => {
     $(id).disabled = !enabled;
-    if (!enabled) $(id).value = "";
+    if (clearValues) $(id).value = "";
   });
-  syncEditorOptionControls(enabled);
+  syncEditorOptionControls(enabled, clearValues);
 }
 
-function syncEditorOptionControls(enabled = state.hasPending && !state.hasCommitted) {
+function syncEditorOptionControls(enabled = state.hasPending && !state.hasCommitted, clearValues = false) {
   [
     ["fieldTagSelect", state.homeboxTags.length],
     ["fieldLocationSelect", state.homeboxLocations.length],
@@ -611,7 +645,7 @@ function syncEditorOptionControls(enabled = state.hasPending && !state.hasCommit
     const el = $(id);
     if (el) {
       el.disabled = !enabled || Number(count) <= 0;
-      if (!enabled) el.value = "";
+      if (clearValues) el.value = "";
     }
   });
 }
@@ -696,6 +730,15 @@ function applySelectedHomeboxLocation() {
   select.value = "";
 }
 
+function homeboxLocationExistsExact(name) {
+  const target = String(name || "").trim();
+  if (!target) return true;
+  return state.homeboxLocations.some((row) => {
+    const locationName = typeof row === "string" ? row : row?.name;
+    return locationName === target;
+  });
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -714,6 +757,15 @@ async function post(path, payload = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) appendLog(data.message || `请求失败 ${res.status}`);
   return data;
+}
+
+async function refreshStatusNow() {
+  try {
+    const data = await fetch("/api/status", { cache: "no-store" }).then((r) => r.json());
+    render(data);
+  } catch (err) {
+    appendLog(`状态刷新失败: ${err}`);
+  }
 }
 
 function selectedOllamaTarget() {
@@ -850,7 +902,7 @@ function modePayload(extra = {}) {
 
 function runtimeConfigPayload() {
   return {
-    mode: fieldValue("mode", "scale"),
+    mode: fieldValue("mode", "auto"),
     homebox_url: fieldValue("homeboxConfigUrl", ""),
     homebox_username: fieldValue("homeboxUsername", ""),
     homebox_password: fieldValue("homeboxPassword", ""),
@@ -909,6 +961,178 @@ function appendLog(line) {
   box.scrollTop = box.scrollHeight;
 }
 
+function itemSubtitle(item) {
+  const parts = [];
+  if (item.location) parts.push(item.location);
+  if (item.manufacturer) parts.push(item.manufacturer);
+  if (item.model) parts.push(item.model);
+  if (item.tags?.length) parts.push(item.tags.slice(0, 3).join(", "));
+  return parts.join(" · ") || item.description || "--";
+}
+
+function renderFindResults(rows, message = "") {
+  state.findRows = rows || [];
+  state.findSelectedIndex = null;
+  state.findSelectedUrl = "";
+  $("findOpenHomebox").disabled = true;
+  $("findCount").textContent = message || `${state.findRows.length} 项`;
+  if (!state.findRows.length) {
+    $("findResults").innerHTML = `<div class="empty-state">没有结果</div>`;
+    $("findDetail").innerHTML = `<div class="empty-state">选择一个物品查看位置、标签和识别信息</div>`;
+    return;
+  }
+  $("findResults").innerHTML = state.findRows
+    .map((row, index) => {
+      const item = row.kind === "rfid" ? row.item : row;
+      if (!item) {
+        const rssi = row.rssi_dbm === null || row.rssi_dbm === undefined ? "--" : `${row.rssi_dbm} dBm`;
+        return `
+          <button class="find-item" data-find-index="${index}">
+            <strong>未匹配 RFID 标签</strong>
+            <span>${escapeHtml(row.epc_ascii || row.epc || "--")}</span>
+            <small>RSSI ${escapeHtml(rssi)}</small>
+          </button>
+        `;
+      }
+      const rfidText = row.kind === "rfid" ? ` · RSSI ${row.rssi_dbm ?? "--"} dBm` : "";
+      return `
+        <button class="find-item" data-find-index="${index}">
+          <strong>${escapeHtml(item.name)}</strong>
+          <span>${escapeHtml(itemSubtitle(item))}</span>
+          <small class="${row.kind === "rfid" ? "rfid-hit" : ""}">${escapeHtml(item.code || item.rfid_code || item.id)}${escapeHtml(rfidText)}</small>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+async function selectFindRow(index) {
+  const row = state.findRows[index];
+  state.findSelectedIndex = index;
+  document.querySelectorAll(".find-item").forEach((button) => {
+    button.classList.toggle("active", Number(button.dataset.findIndex) === index);
+  });
+  if (!row) return;
+  const item = row.kind === "rfid" ? row.item : row;
+  if (!item) {
+    renderFindRfidOnly(row);
+    return;
+  }
+  let detail = item;
+  if (item.id) {
+    const data = await post("/api/find/item", { id: item.id });
+    if (data.ok && data.item) detail = data.item;
+    else appendLog(data.message || "物品详情读取失败");
+  }
+  renderFindDetail(detail, row.kind === "rfid" ? row : null);
+}
+
+function renderFindRfidOnly(tag) {
+  state.findSelectedUrl = "";
+  $("findOpenHomebox").disabled = true;
+  $("findDetail").innerHTML = `
+    <div class="detail-title">
+      <h3>未匹配 RFID 标签</h3>
+      <span class="detail-code">${escapeHtml(tag.epc_ascii || tag.epc || "--")}</span>
+    </div>
+    <div class="detail-grid">
+      <span>EPC HEX</span><strong>${escapeHtml(tag.epc || "--")}</strong>
+      <span>RSSI</span><strong>${escapeHtml(tag.rssi_dbm ?? "--")} dBm</strong>
+      <span>天线</span><strong>${escapeHtml(tag.antenna ?? "--")}</strong>
+    </div>
+  `;
+}
+
+function renderFindDetail(item, rfidTag = null) {
+  state.findSelectedUrl = item.url || "";
+  $("findOpenHomebox").disabled = !state.findSelectedUrl;
+  const tags = (item.tags || []).map((tag) => `<span class="tag-pill">${escapeHtml(tag)}</span>`).join("");
+  const fields = (item.fields || []).map((field) => `
+    <span>${escapeHtml(field.name || "--")}</span><strong>${escapeHtml(field.value || "--")}</strong>
+  `).join("");
+  const rfidRows = rfidTag ? `
+    <span>当前 RFID</span><strong>${escapeHtml(rfidTag.epc_ascii || rfidTag.epc || "--")}</strong>
+    <span>信号</span><strong>${escapeHtml(rfidTag.rssi_dbm ?? "--")} dBm</strong>
+  ` : "";
+  $("findDetail").innerHTML = `
+    <div class="detail-title">
+      <h3>${escapeHtml(item.name || "未命名物品")}</h3>
+      <span class="detail-code">${escapeHtml(item.code || item.rfid_code || item.id || "--")}</span>
+    </div>
+    <div class="detail-grid">
+      <span>位置</span><strong>${escapeHtml(item.location || "--")}</strong>
+      <span>RFID</span><strong>${escapeHtml(item.rfid_code || "--")}</strong>
+      <span>制造商</span><strong>${escapeHtml(item.manufacturer || "--")}</strong>
+      <span>型号</span><strong>${escapeHtml(item.model || "--")}</strong>
+      <span>数量</span><strong>${escapeHtml(item.quantity ?? "--")}</strong>
+      ${rfidRows}
+      ${fields}
+    </div>
+    <div>
+      <span class="label">标签</span>
+      <div class="tag-line">${tags || '<span class="empty-state">无标签</span>'}</div>
+    </div>
+    <div>
+      <span class="label">描述</span>
+      <p>${escapeHtml(item.description || item.notes || "--")}</p>
+    </div>
+  `;
+}
+
+async function runFindSearch() {
+  const query = fieldValue("findQuery", "").trim();
+  const limit = fieldNumber("findLimit", 50);
+  $("findCount").textContent = "搜索中...";
+  const data = await post("/api/find/search", { q: query, limit });
+  appendLog(data.message || (data.ok ? "找物搜索完成" : "找物搜索失败"));
+  renderFindResults(data.items || [], data.message || "");
+}
+
+async function runFindRfidScan() {
+  $("findCount").textContent = "盘点中...";
+  const data = await post("/api/find/rfid", runtimeConfigPayload());
+  appendLog(data.message || (data.ok ? "RFID 找物完成" : "RFID 找物失败"));
+  const rows = (data.tags || []).map((tag) => ({ ...tag, kind: "rfid" }));
+  renderFindResults(rows, data.message || "");
+}
+
+function logImageUrl(nameOrPath) {
+  const text = String(nameOrPath || "").trim();
+  if (!text) return "";
+  const name = text.split(/[\\/]/).pop();
+  return name ? `/logs/${encodeURIComponent(name)}?t=${Date.now()}` : "";
+}
+
+function renderLabelPreview(preview) {
+  const panel = $("labelPreviewPanel");
+  if (!preview) {
+    panel.hidden = true;
+    $("humanLabelPreview").removeAttribute("src");
+    $("codeLabelPreview").removeAttribute("src");
+    setText("labelPreviewEpc", "--");
+    setText("labelPreviewUrl", "--");
+    return;
+  }
+  state.labelPreview = preview;
+  panel.hidden = false;
+  const human = logImageUrl(preview.human_preview_name || preview.human_preview);
+  const code = logImageUrl(preview.code_preview_name || preview.code_preview);
+  if (human) $("humanLabelPreview").src = human;
+  if (code) $("codeLabelPreview").src = code;
+  const payload = preview.rfid_payload || {};
+  setText("labelPreviewTitle", preview.code ? `${preview.code} · 预览` : "标签预览");
+  setText("labelPreviewEpc", payload.epc_code || payload.epc_hex_candidate || "--");
+  setText("labelPreviewUrl", payload.url || "--");
+}
+
+async function fetchLabelPreview() {
+  const data = await post("/api/label_preview");
+  appendLog(data.message || (data.ok ? "标签预览已生成" : "标签预览失败"));
+  if (!data.ok || !data.preview) return null;
+  renderLabelPreview(data.preview);
+  return data.preview;
+}
+
 function collectPendingFields() {
   return {
     name: $("fieldName").value.trim(),
@@ -961,6 +1185,69 @@ function renderRfidConfirm(data) {
   });
 }
 
+function renderRfidProbePanel(data) {
+  const panel = $("rfidProbePanel");
+  const tags = data?.tags || [];
+  setText("rfidConfigState", data?.message || (data?.ok ? `读到 ${tags.length} 个标签` : "探测失败"));
+  if (!data?.ok) {
+    panel.innerHTML = `<div class="rfid-empty">${escapeHtml(data?.message || "RFID 探测失败")}</div>`;
+    return;
+  }
+  if (!tags.length) {
+    panel.innerHTML = `<div class="rfid-empty">没有读到 RFID 标签</div>`;
+    return;
+  }
+  const target = data.target_payload?.epc_code
+    ? `<div class="rfid-probe-target"><span>当前待写入</span><strong>${escapeHtml(data.target_payload.epc_code)}</strong></div>`
+    : "";
+  panel.innerHTML = `
+    ${target}
+    <div class="rfid-tag-list">
+      ${tags
+        .map((tag) => {
+          const epc = tag.epc || "--";
+          const ascii = tag.epc_ascii ? `ASCII: ${escapeHtml(tag.epc_ascii)}` : "ASCII: --";
+          const rssi = tag.rssi_dbm === null || tag.rssi_dbm === undefined ? "--" : `${tag.rssi_dbm} dBm`;
+          return `
+            <div class="rfid-choice rfid-probe-row">
+              <span class="rfid-signal-dot"></span>
+              <span>
+                <strong>${escapeHtml(epc)}</strong>
+                <span>${ascii} · Ant ${escapeHtml(tag.antenna ?? "--")}</span>
+              </span>
+              <span class="rfid-rssi">${escapeHtml(rssi)}</span>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderRfidReleasePanel(data) {
+  const panel = $("rfidProbePanel");
+  const killed = data?.killed || [];
+  const killedHtml = killed.length
+    ? `<div class="rfid-tag-list">${killed
+        .map((proc) => `
+          <div class="rfid-choice rfid-probe-row">
+            <span class="rfid-signal-dot"></span>
+            <span>
+              <strong>PID ${escapeHtml(proc.pid)}</strong>
+              <span>${escapeHtml(proc.name || "")}</span>
+            </span>
+          </div>
+        `)
+        .join("")}</div>`
+    : "";
+  panel.innerHTML = `
+    <div class="rfid-empty">${escapeHtml(data?.message || "串口释放完成")}</div>
+    ${data?.before_error ? `<div class="rfid-empty">释放前: ${escapeHtml(data.before_error)}</div>` : ""}
+    ${data?.after_error ? `<div class="rfid-empty">释放后: ${escapeHtml(data.after_error)}</div>` : ""}
+    ${killedHtml}
+  `;
+}
+
 async function fetchRfidInventoryForConfirm() {
   const data = await post("/api/rfid/inventory", runtimeConfigPayload());
   appendLog(data.message || (data.ok ? "RFID 盘点完成" : "RFID 盘点失败"));
@@ -1003,6 +1290,9 @@ function openRfidConfirm(data) {
 }
 
 function attachHandlers() {
+  document.querySelectorAll("[data-app-mode]").forEach((button) => {
+    button.addEventListener("click", () => setAppMode(button.dataset.appMode || "intake"));
+  });
   document.querySelectorAll(".module-tab").forEach((tab) => {
     tab.addEventListener("click", () => setActiveModule(tab.dataset.module || "overview"));
   });
@@ -1019,6 +1309,24 @@ function attachHandlers() {
   });
   $("refreshModels").addEventListener("click", () => refreshModels());
   $("refreshHomeboxOptions").addEventListener("click", () => loadHomeboxOptions(true));
+  $("labelPreviewRefresh").addEventListener("click", fetchLabelPreview);
+  $("findSearch").addEventListener("click", runFindSearch);
+  $("findRfidScan").addEventListener("click", runFindRfidScan);
+  $("findClear").addEventListener("click", () => {
+    $("findQuery").value = "";
+    renderFindResults([], "--");
+  });
+  $("findQuery").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") runFindSearch();
+  });
+  $("findResults").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-find-index]");
+    if (!button) return;
+    selectFindRow(Number(button.dataset.findIndex));
+  });
+  $("findOpenHomebox").addEventListener("click", () => {
+    if (state.findSelectedUrl) window.open(state.findSelectedUrl, "_blank", "noopener");
+  });
   [
     "mode",
     "model",
@@ -1074,9 +1382,26 @@ function attachHandlers() {
     appendLog(data.message ? `识别任务: ${data.message}` : "已提交识别");
   });
   $("resetSelection").addEventListener("click", resetSelection);
+  $("labelPreviewButton").addEventListener("click", fetchLabelPreview);
+  $("importRecord").addEventListener("click", () => $("recordFile").click());
+  $("recordFile").addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const record = JSON.parse(text);
+      const data = await post("/api/import_intake_record", { record });
+      appendLog(data.message || (data.ok ? "入库记录已导入" : "入库记录导入失败"));
+      await refreshStatusNow();
+    } catch (err) {
+      appendLog(`入库记录导入失败: ${err}`);
+    } finally {
+      event.target.value = "";
+    }
+  });
   $("scanWrite").addEventListener("click", async () => {
     if (!state.hasPending) {
-      appendLog("请先点击“识别待确认”，生成可编辑物品。");
+      appendLog("请先点击“识别物品”，生成可编辑物品。");
       return;
     }
     if (state.hasCommitted) {
@@ -1087,8 +1412,18 @@ function attachHandlers() {
       appendLog("名称不能为空。");
       return;
     }
+    const fields = collectPendingFields();
+    const locationName = fields.suggested_location;
+    if (locationName && !homeboxLocationExistsExact(locationName)) {
+      const createLocation = confirm(`Homebox 里没有逐字匹配的位置：\n${locationName}\n\n是否先创建这个新位置，然后继续入库？`);
+      if (!createLocation) {
+        appendLog("已取消入库：请改为选择已有位置，或确认创建新位置。");
+        return;
+      }
+      fields.create_missing_location = true;
+    }
     if (!confirm("确认按当前表单写入 Homebox？")) return;
-    const data = await post("/api/commit", collectPendingFields());
+    const data = await post("/api/commit", fields);
     appendLog(data.message || (data.ok ? "入库完成" : "入库失败"));
   });
   $("labelWrite").addEventListener("click", async () => {
@@ -1096,6 +1431,8 @@ function attachHandlers() {
       appendLog("请先入库，再写标签。");
       return;
     }
+    const preview = await fetchLabelPreview();
+    if (!preview) return;
     let rfidTargetEpc = null;
     if (fieldChecked("writeRfidTags", true)) {
       const inventory = await fetchRfidInventoryForConfirm();
@@ -1110,13 +1447,21 @@ function attachHandlers() {
     }
     const data = await post("/api/write_labels", { rfid_target_epc: rfidTargetEpc });
     appendLog(data.message || (data.ok ? "写标签完成" : "写标签失败"));
+    if (data.result?.label) renderLabelPreview(data.result.label);
   });
   $("diagnose").addEventListener("click", () => post("/api/action", modePayload({ action: "diagnose" })));
   $("restartOllama").addEventListener("click", () => post("/api/action", { action: "ollama_restart" }));
   $("cancel").addEventListener("click", () => post("/api/cancel"));
   $("rfidProbe").addEventListener("click", async () => {
-    const data = await post("/api/rfid/probe");
-    appendLog(data.message || JSON.stringify(data));
+    const data = await post("/api/rfid/inventory", runtimeConfigPayload());
+    appendLog(data.message || (data.ok ? "RFID 探测完成" : "RFID 探测失败"));
+    renderRfidProbePanel(data);
+  });
+  $("rfidRelease").addEventListener("click", async () => {
+    if (!confirm("只尝试结束 O.R.B.I.T. 自己启动的相关子进程来释放当前 RFID 串口，继续吗？")) return;
+    const data = await post("/api/rfid/release", runtimeConfigPayload());
+    appendLog(data.message || (data.ok ? "RFID 串口释放完成" : "RFID 串口释放失败"));
+    renderRfidReleasePanel(data);
   });
   $("cameraProbe").addEventListener("click", async () => {
     const data = await post("/api/camera/probe", runtimeConfigPayload());
@@ -1160,7 +1505,8 @@ function connectEvents() {
 
 attachHandlers();
 attachSelectionHandlers();
-setEditorEnabled(false);
+setAppMode("intake");
+setEditorEnabled(false, true);
 updateOllamaControls(false);
 connectEvents();
 pollFallback();

@@ -13,6 +13,7 @@ __pycache__/
 
 # O.R.B.I.T. runtime captures, AI results, and service logs
 VISION/logs/
+VISION/intake_records/
 *.jpg
 *.jpeg
 *.png

@@ -21,8 +21,6 @@ except Exception:
 ROOT = Path(__file__).resolve().parent
 LOG_DIR = ROOT / "logs"
 DEFAULT_PRINTER = os.getenv("ORBIT_LABEL_PRINTER", "TSC TTP-244 Pro")
-OWNER_NAME = os.getenv("ORBIT_OWNER_NAME", "Owner")
-OWNER_PHONE = os.getenv("ORBIT_OWNER_PHONE", "")
 DOTS_PER_MM = int(os.getenv("ORBIT_LABEL_DOTS_PER_MM", "8"))
 LABEL_W_MM = 40
 LABEL_H_MM = 20
@@ -43,7 +41,7 @@ def font(size: int, bold: bool = False):
 
 
 def item_code(item: dict) -> str:
-    raw = item.get("assetId") or item.get("asset_id") or item.get("id") or item.get("code") or "ORBIT"
+    raw = item.get("assetId") or item.get("asset_id") or item.get("code") or item.get("id") or "ORBIT"
     text = str(raw).strip()
     if not text:
         text = "ORBIT"
@@ -52,18 +50,61 @@ def item_code(item: dict) -> str:
     return text[:32]
 
 
+def environment_value(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+    except Exception:
+        return ""
+
+    locations = (
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    )
+    for root, key_path in locations:
+        try:
+            with winreg.OpenKey(root, key_path) as key:
+                raw, _kind = winreg.QueryValueEx(key, name)
+        except OSError:
+            continue
+        value = str(raw or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def owner_line(placeholder: str = "") -> str:
+    line = " ".join(
+        part
+        for part in (
+            environment_value("ORBIT_OWNER_NAME"),
+            environment_value("ORBIT_OWNER_PHONE"),
+        )
+        if part
+    )
+    if line:
+        return line
+    return placeholder
+
+
 def display_code(item: dict) -> str:
-    raw = str(item.get("assetId") or item.get("asset_id") or item.get("id") or item.get("code") or "ORBIT").strip()
-    short = raw.split("-")[0] if "-" in raw else raw
-    if len(short) > 10:
-        short = short[:10]
-    if not short:
-        short = "ORBIT"
-    return short if short.upper().startswith("ORB") else f"ORB-{short.upper()}"
+    return rfid_epc_code(item)
 
 
 def rfid_epc_code(item: dict) -> str:
-    raw = str(item.get("assetId") or item.get("asset_id") or item.get("id") or item.get("code") or "").strip()
+    raw = str(item.get("assetId") or item.get("asset_id") or item.get("code") or item.get("id") or "").strip()
+    readable = item_code(item).upper()
+    if re.fullmatch(r"[A-Z0-9-]+", readable):
+        if 8 <= len(readable) <= 12 and len(readable) % 2 == 0:
+            return readable
+        if readable.startswith("ORB-"):
+            compact = "ORB-" + re.sub(r"[^A-Z0-9]", "", readable[4:])
+            if 8 <= len(compact) <= 12 and len(compact) % 2 == 0:
+                return compact
     clean = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
     if len(clean) >= 8:
         suffix = clean[:8]
@@ -187,7 +228,6 @@ def human_label_image(item: dict, ai: Optional[dict] = None, measurement: Option
     ai = ai or {}
     measurement = measurement or {}
     name = item.get("name") or ai.get("name") or "未命名物品"
-    code = item_code(item)
     visible_code = display_code(item)
     manufacturer = ai.get("manufacturer") or item.get("manufacturer") or ""
     model = item.get("modelNumber") or ai.get("model") or ""
@@ -234,9 +274,14 @@ def human_label_image(item: dict, ai: Optional[dict] = None, measurement: Option
     return img
 
 
-def code_label_image(item: dict, homebox_url: str, ai: Optional[dict] = None) -> Image.Image:
+def code_label_image(
+    item: dict,
+    homebox_url: str,
+    ai: Optional[dict] = None,
+    owner_placeholder: str = "",
+) -> Image.Image:
     ai = ai or {}
-    code = item_code(item)
+    code = rfid_epc_code(item)
     visible_code = display_code(item)
     url = item_url(homebox_url, item)
 
@@ -253,9 +298,13 @@ def code_label_image(item: dict, homebox_url: str, ai: Optional[dict] = None) ->
     img.paste(qr_image(url, qr_size), (qr_x, qr_y))
     left_w = qr_x - 16
     owner_font = font(13, bold=True)
-    owner_line = " ".join(part for part in (OWNER_NAME, OWNER_PHONE) if part)
-    render_text_lines(draw, (10, 6), owner_line, left_w, 1, owner_font)
-    render_text_lines(draw, (10, 28), item.get("name") or ai.get("name") or "", left_w, 2, small)
+    owner = owner_line(owner_placeholder)
+    if owner:
+        render_text_lines(draw, (10, 6), owner, left_w, 1, owner_font)
+        name_y = 28
+    else:
+        name_y = 8
+    render_text_lines(draw, (10, name_y), item.get("name") or ai.get("name") or "", left_w, 2, small)
     marker_size = 48
     marker_y = 72
     img.paste(aruco_image(code, marker_size), (10, marker_y))
@@ -349,9 +398,14 @@ def print_item_label_set(
     dry_run: bool = False,
 ) -> dict:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    code = item_code(item)
+    code = rfid_epc_code(item)
     human = human_label_image(item, ai=ai, measurement=measurement)
-    coded = code_label_image(item, homebox_url=homebox_url, ai=ai)
+    coded = code_label_image(
+        item,
+        homebox_url=homebox_url,
+        ai=ai,
+        owner_placeholder="[Owner Tel]" if dry_run else "",
+    )
     human_preview = save_preview(human, f"label_human_{code}_{stamp}.png")
     code_preview = save_preview(coded, f"label_code_{code}_{stamp}.png")
     if not dry_run:
@@ -367,10 +421,9 @@ def print_item_label_set(
 
 
 def rfid_payload(item: dict, homebox_url: str) -> dict:
-    code = item_code(item)
     epc_code = rfid_epc_code(item)
     return {
-        "code": code,
+        "code": epc_code,
         "epc_code": epc_code,
         "epc_hex_candidate": rfid_epc_hex(item),
         "url": item_url(homebox_url, item),

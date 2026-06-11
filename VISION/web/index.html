@@ -15,6 +15,11 @@
         <p id="clock">--</p>
       </div>
     </div>
+    <div class="app-mode" aria-label="模式">
+      <span>模式</span>
+      <button class="mode-button active" data-app-mode="intake">入库</button>
+      <button class="mode-button" data-app-mode="find">找物</button>
+    </div>
     <div class="chips">
       <span class="chip" id="chip-realsense">主相机</span>
       <span class="chip" id="chip-scale">Scale</span>
@@ -25,20 +30,20 @@
   </header>
 
   <main class="layout">
-    <section class="panel intake">
+    <section class="panel intake" id="intakePanel">
       <div class="panel-head intake-head">
         <div class="head-title">
           <h2>入库</h2>
-          <span id="intakeProfile">scale · --</span>
+          <span id="intakeProfile">自动 · --</span>
         </div>
         <div class="selectors compact-selectors">
-          <label class="inline-field">模式
+          <label class="inline-field">图像分割模式
             <select id="mode">
-              <option value="scale">scale</option>
-              <option value="auto">auto</option>
-              <option value="macro">macro</option>
-              <option value="full">full</option>
-              <option value="furniture">furniture</option>
+              <option value="auto">自动</option>
+              <option value="scale">称重台</option>
+              <option value="macro">微距</option>
+              <option value="full">全图</option>
+              <option value="furniture">大件</option>
             </select>
           </label>
         </div>
@@ -54,9 +59,12 @@
 
       <div class="controls">
         <button id="capture" class="button secondary"><span>□</span>拍照</button>
-        <button id="identifySelection" class="button primary"><span>▣</span>识别待确认</button>
+        <button id="identifySelection" class="button primary"><span>▣</span>识别物品</button>
         <button id="scanWrite" class="button danger"><span>●</span>入库</button>
+        <button id="labelPreviewButton" class="button secondary"><span>▥</span>预览标签</button>
         <button id="labelWrite" class="button primary"><span>▤</span>写标签</button>
+        <button id="importRecord" class="button secondary"><span>▣</span>导入记录</button>
+        <input id="recordFile" type="file" accept=".json,application/json" hidden>
         <button id="diagnose" class="button secondary"><span>◇</span>诊断</button>
         <button id="resetSelection" class="button secondary"><span>□</span>重置框</button>
         <button id="cancel" class="button ghost"><span>×</span>取消</button>
@@ -89,7 +97,7 @@
             <span class="label">待确认物品</span>
             <strong id="editorStatus">识别后可编辑</strong>
           </div>
-          <button id="discardPending" class="mini-button">丢弃</button>
+          <button id="discardPending" class="mini-button">清除</button>
         </div>
         <div class="form-grid">
           <label>名称<input id="fieldName" autocomplete="off"></label>
@@ -117,6 +125,75 @@
           </label>
           <label class="span-2">描述<textarea id="fieldDescription"></textarea></label>
           <label class="span-2">识别依据<textarea id="fieldReasoning"></textarea></label>
+        </div>
+        <div id="labelPreviewPanel" class="label-preview-panel" hidden>
+          <div class="label-preview-head">
+            <div>
+              <span class="label">标签预览</span>
+              <strong id="labelPreviewTitle">写标签前可预览</strong>
+            </div>
+            <button id="labelPreviewRefresh" class="mini-button" type="button">刷新预览</button>
+          </div>
+          <div class="label-preview-grid">
+            <figure>
+              <figcaption>人读 PET</figcaption>
+              <img id="humanLabelPreview" alt="人读 PET 标签预览">
+            </figure>
+            <figure>
+              <figcaption>AR / QR PET</figcaption>
+              <img id="codeLabelPreview" alt="AR 和 QR 标签预览">
+            </figure>
+            <div class="label-preview-meta">
+              <span>RFID EPC</span><strong id="labelPreviewEpc">--</strong>
+              <span>物品页</span><strong id="labelPreviewUrl">--</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel finder" id="finderPanel" hidden>
+      <div class="panel-head intake-head">
+        <div class="head-title">
+          <h2>找物</h2>
+          <span id="findProfile">Homebox · RFID</span>
+        </div>
+        <div class="selectors compact-selectors">
+          <label class="inline-field">范围
+            <select id="findLimit">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="find-toolbar">
+        <input id="findQuery" class="find-input" placeholder="搜索名称、标签、位置、ORB 编号或 Homebox ID" autocomplete="off">
+        <button id="findSearch" class="button primary"><span>◇</span>搜索</button>
+        <button id="findRfidScan" class="button secondary"><span>▣</span>扫 RFID</button>
+        <button id="findClear" class="button ghost"><span>×</span>清空</button>
+      </div>
+
+      <div class="find-surface">
+        <div class="find-results">
+          <div class="list-head">
+            <span>结果</span>
+            <strong id="findCount">--</strong>
+          </div>
+          <div id="findResults" class="find-list">
+            <div class="empty-state">输入关键词或盘点 RFID</div>
+          </div>
+        </div>
+        <div class="find-detail">
+          <div class="list-head">
+            <span>详情</span>
+            <button id="findOpenHomebox" class="mini-button" disabled>打开 Homebox</button>
+          </div>
+          <div id="findDetail" class="find-detail-body">
+            <div class="empty-state">选择一个物品查看位置、标签和识别信息</div>
+          </div>
         </div>
       </div>
     </section>
@@ -298,9 +375,13 @@
             </div>
             <div class="module-actions">
               <button id="rfidProbe" class="mini-button">探测 RFID</button>
+              <button id="rfidRelease" class="mini-button">释放串口</button>
             </div>
             <div class="kv module-kv">
               <span>状态</span><strong id="rfidConfigState">--</strong>
+            </div>
+            <div id="rfidProbePanel" class="rfid-probe-panel">
+              <div class="rfid-empty">点击探测 RFID 后显示附近标签</div>
             </div>
           </section>
 

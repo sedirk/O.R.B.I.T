@@ -48,6 +48,33 @@ body {
   min-width: 260px;
 }
 
+.app-mode {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--line);
+  background: #111618;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mode-button {
+  height: 26px;
+  min-width: 56px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.mode-button.active {
+  border-color: rgba(73, 193, 114, 0.6);
+  background: rgba(73, 193, 114, 0.13);
+  color: #dcf8e6;
+}
+
 .mark {
   width: 42px;
   height: 42px;
@@ -172,6 +199,10 @@ h2 {
   grid-row: span 2;
 }
 
+.finder {
+  grid-row: span 2;
+}
+
 select,
 button {
   font: inherit;
@@ -269,11 +300,176 @@ select {
 }
 
 .controls {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.find-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 112px 112px 92px;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  background: #151a1d;
+}
+
+.find-input {
+  height: 42px;
+  min-width: 0;
+  border: 1px solid #3b464c;
+  background: #101416;
+  color: var(--text);
+  padding: 0 12px;
+  font: inherit;
+}
+
+.find-surface {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.85fr) minmax(320px, 1.15fr);
+  min-height: 700px;
+}
+
+.find-results {
+  border-right: 1px solid var(--line);
+  min-width: 0;
+}
+
+.find-detail {
+  min-width: 0;
+}
+
+.list-head {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.list-head strong {
+  color: var(--text);
+}
+
+.find-list {
+  max-height: 656px;
+  overflow: auto;
+}
+
+.find-item {
+  width: 100%;
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.find-item:hover,
+.find-item.active {
+  background: #20282b;
+}
+
+.find-item strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-item span,
+.find-item small {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-item .rfid-hit {
+  color: var(--green);
+}
+
+.find-detail-body {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.detail-title {
+  display: grid;
+  gap: 6px;
+}
+
+.detail-title h3 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.detail-code {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid rgba(73, 193, 114, 0.45);
+  color: #dffbe7;
+  background: rgba(73, 193, 114, 0.1);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+.detail-grid span,
+.detail-grid strong {
+  min-height: 38px;
+  padding: 10px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.detail-grid span {
+  color: var(--muted);
+}
+
+.detail-grid strong {
+  color: var(--text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.tag-line {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.tag-pill {
+  padding: 3px 7px;
+  border: 1px solid #3b464c;
+  color: #d7e7df;
+  background: #101416;
+  font-size: 12px;
+}
+
+.empty-state {
+  padding: 18px;
+  color: var(--muted);
 }
 
 .button,
@@ -287,12 +483,14 @@ select {
 
 .button {
   display: inline-flex;
+  flex: 1 1 92px;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  min-width: 0;
+  min-width: 92px;
   padding: 0 10px;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .button span {
@@ -503,6 +701,69 @@ select:focus {
   outline-offset: 0;
 }
 
+.label-preview-panel {
+  border-top: 1px solid var(--line);
+  padding: 14px 16px 16px;
+  background: #111517;
+}
+
+.label-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.label-preview-head strong {
+  font-size: 15px;
+}
+
+.label-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.label-preview-grid figure {
+  margin: 0;
+  min-width: 0;
+}
+
+.label-preview-grid figcaption {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.label-preview-grid img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  object-fit: contain;
+  border: 1px solid #344047;
+  background: #f7f7f2;
+  image-rendering: pixelated;
+}
+
+.label-preview-meta {
+  grid-column: span 2;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px 10px;
+  padding: 10px;
+  border: 1px solid #2d363b;
+  background: #0f1315;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.label-preview-meta strong {
+  min-width: 0;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
 .span-2 {
   grid-column: span 2;
 }
@@ -683,6 +944,36 @@ select:focus {
   justify-content: flex-end;
   gap: 8px;
   padding: 0 16px 16px;
+}
+
+.rfid-probe-panel {
+  display: grid;
+  gap: 10px;
+  padding: 0 16px 16px;
+}
+
+.rfid-probe-target {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid #2d363b;
+  background: #101416;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rfid-probe-target strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.rfid-signal-dot {
+  width: 12px;
+  height: 12px;
+  border: 1px solid rgba(73, 193, 114, 0.8);
+  background: rgba(73, 193, 114, 0.2);
 }
 
 .device-list {
@@ -943,6 +1234,14 @@ select:focus {
 
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .label-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .label-preview-meta {
+    grid-column: 1;
   }
 
   .span-2 {

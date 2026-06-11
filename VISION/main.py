@@ -26,9 +26,9 @@ DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
 DEFAULT_OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 DEFAULT_OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "192"))
 SCAN_MODES = ["scale", "auto", "full", "macro", "furniture"]
-DEFAULT_SCAN_MODE = os.getenv("ORBIT_SCAN_MODE", os.getenv("SCAN_MODE", "scale"))
+DEFAULT_SCAN_MODE = os.getenv("ORBIT_SCAN_MODE", os.getenv("SCAN_MODE", "auto"))
 if DEFAULT_SCAN_MODE not in SCAN_MODES:
-    DEFAULT_SCAN_MODE = "scale"
+    DEFAULT_SCAN_MODE = "auto"
 
 
 def build_parser():
