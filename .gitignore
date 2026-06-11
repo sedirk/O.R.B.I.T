@@ -18,6 +18,9 @@ VISION/intake_records/
 *.jpeg
 *.png
 *.bmp
+!docs/
+!docs/assets/
+!docs/assets/*.png
 
 # Downloaded driver archives/extractions
 VISION/drivers/

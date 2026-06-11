@@ -4,6 +4,8 @@
 
 O.R.B.I.T. 是一个面向工作室、实验室和零件仓的半自动物品管理平台。它把 RGB-D/USB 摄像头、电子秤、Ollama 视觉语言模型、Homebox、PET 标签打印机和 RFID 读写器接到同一个网页 GUI 中，用一条可确认、可恢复、可追溯的流程完成入库和找物。
 
+![O.R.B.I.T. 网页控制台](docs/assets/orbit-web-console.png)
+
 当前版本的重点是两种模式：
 
 - **入库**：拍照、框选、识别、人工编辑、写入 Homebox、打印 PET 标签、写入 RFID 标签。
