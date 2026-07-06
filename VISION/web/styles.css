@@ -329,16 +329,76 @@ select {
 .find-surface {
   display: grid;
   grid-template-columns: minmax(260px, 0.85fr) minmax(320px, 1.15fr);
-  min-height: 700px;
+  height: clamp(560px, calc(100vh - 230px), 760px);
+  min-height: 0;
 }
 
 .find-results {
   border-right: 1px solid var(--line);
   min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 46px minmax(0, 1fr);
+}
+
+.find-source-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
+}
+
+.find-source-tab {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: #111719;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.find-source-tab:last-child {
+  border-right: 0;
+}
+
+.find-source-tab.active {
+  background: #1d272a;
+  color: var(--text);
+  box-shadow: inset 0 -3px 0 var(--green);
+}
+
+.find-source-tab span,
+.find-source-tab strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-source-tab strong {
+  color: inherit;
+  font-size: 12px;
+}
+
+.find-result-group {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.find-result-group[hidden] {
+  display: none;
 }
 
 .find-detail {
   min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 44px minmax(0, 1fr);
 }
 
 .list-head {
@@ -358,7 +418,7 @@ select {
 }
 
 .find-list {
-  max-height: 656px;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -399,6 +459,8 @@ select {
 }
 
 .find-detail-body {
+  min-height: 0;
+  overflow: auto;
   padding: 16px;
   display: grid;
   gap: 14px;
@@ -1097,6 +1159,10 @@ select:focus {
   box-shadow: var(--shadow);
 }
 
+.small-modal {
+  width: min(420px, 100%);
+}
+
 .modal-head,
 .modal-actions {
   display: flex;
@@ -1117,6 +1183,26 @@ select:focus {
   min-height: 0;
   overflow: auto;
   padding: 14px;
+}
+
+.label-option-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.label-option-list .check-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid #3b464c;
+  background: #0f1416;
+}
+
+.label-option-list input {
+  width: auto;
 }
 
 .rfid-target {
@@ -1236,12 +1322,41 @@ select:focus {
     grid-template-columns: 1fr;
   }
 
+  .find-toolbar {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+
+  .find-input {
+    grid-column: 1 / -1;
+  }
+
+  .find-surface {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
+  .find-results {
+    height: min(520px, calc(100vh - 180px));
+    min-height: 360px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .find-detail {
+    min-height: 360px;
+  }
+
   .label-preview-grid {
     grid-template-columns: 1fr;
   }
 
   .label-preview-meta {
     grid-column: 1;
+  }
+
+  .label-option-list {
+    grid-template-columns: 1fr;
   }
 
   .span-2 {
@@ -1288,6 +1403,10 @@ select:focus {
   }
 
   .controls {
+    grid-template-columns: 1fr;
+  }
+
+  .find-toolbar {
     grid-template-columns: 1fr;
   }
 

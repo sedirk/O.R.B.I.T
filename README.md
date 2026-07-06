@@ -2,7 +2,7 @@
 
 **Object Recognition, Binning, and Intelligent Tracking**
 
-O.R.B.I.T. 是一个面向工作室、实验室和零件仓的半自动物品管理平台。它把 RGB-D/USB 摄像头、电子秤、Ollama 视觉语言模型、Homebox、PET 标签打印机和 RFID 读写器接到同一个网页 GUI 中，用一条可确认、可恢复、可追溯的流程完成入库和找物。
+O.R.B.I.T. 是一个面向工作室、实验室和零件仓的半自动物品管理平台。它把 RGB-D/USB 摄像头、电子秤、本机/局域网/云端视觉语言模型、Homebox、PET 标签打印机和 RFID 读写器接到同一个网页 GUI 中，用一条可确认、可恢复、可追溯的流程完成入库和找物。
 
 ![O.R.B.I.T. 网页控制台](docs/assets/orbit-web-console.png)
 
@@ -19,11 +19,12 @@ O.R.B.I.T. 是一个面向工作室、实验室和零件仓的半自动物品管
 - 图像分割模式支持 `auto`、`scale`、`macro`、`full`、`furniture`，默认使用 `auto`。
 - 支持自动框选加手动确认；识别前的最终框选由用户确认，避免把称盘、背景杂物或辅助视角误当作目标。
 - 电子秤通过串口读取重量，重量不从图像或 AI 结果推断。
-- Ollama 支持本机或局域网主机，GUI 可读取当前 Ollama 服务上的模型列表，并选择图像降采样策略。
+- AI 支持本机 Ollama、局域网 Ollama 和 OpenAI 兼容云端接口；GUI 可读取当前服务上的模型列表，并选择图像降采样策略。
 - Homebox 支持登录、读取已有标签和位置、严格复用已有标签/位置、创建物品、上传照片、写入自定义字段。
 - 若输入了 Homebox 中不存在的位置，GUI 会要求确认后再创建新位置，避免 Homebox 500 错误。
 - 标签模块支持 40 mm x 20 mm PET 标签预览和打印：人读标签、AR/QR 标签、RFID EPC。
 - RFID 模块支持 E710/IE701 串口读写、盘点候选标签、按 RSSI 默认选中最强标签、写入前确认、写入后复读校验。
+- 找物模式将 Homebox 数据库检索和 RFID 盘点拆成独立标签页，RFID 盘点不会覆盖数据库搜索结果。
 - 每次 Homebox 入库和写标签会保存本地 `.orbit-intake.json` 记录，可在 GUI 中导入恢复当时的物品状态。
 
 ## 硬件拓扑
@@ -36,7 +37,7 @@ O.R.B.I.T. 是一个面向工作室、实验室和零件仓的半自动物品管
 | RFID | E710/IE701 读写板，CP210x USB-UART | EPC 读取、RSSI 盘点、EPC 写入 |
 | 标签打印机 | TSC TTP-244 Pro | 40 mm x 20 mm PET 标签打印 |
 | 数据后台 | Homebox | 物品、位置、标签、照片和字段管理 |
-| AI 推理 | Ollama 本机或局域网 GPU 主机 | 视觉语言模型识别 |
+| AI 推理 | 本机 Ollama、局域网 GPU 主机或 OpenAI 兼容云端 API | 视觉语言模型识别 |
 
 ## 软件结构
 
@@ -84,6 +85,11 @@ $env:HOMEBOX_PASSWORD = "<homebox password>"
 
 $env:OLLAMA_API_URL = "http://127.0.0.1:11434/api/chat"
 $env:OLLAMA_MODEL = "gemma3:4b"
+
+$env:ORBIT_AI_TARGET = "local" # local / lan / cloud
+$env:ORBIT_CLOUD_PROVIDER = "openai" # openai / gemini
+$env:ORBIT_AI_API_BASE = "https://api.openai.com/v1"
+$env:ORBIT_AI_API_KEY = "<openai-compatible api key>"
 
 $env:SCALE_PORT = "COM9"
 $env:RFID_PORT = "COM3"
@@ -139,10 +145,13 @@ Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -Fil
 
 1. 选择 **找物** 模式。
 2. 用名称、编号、品牌、型号、位置或标签搜索 Homebox 物品。
-3. 可使用 RFID 盘点读取天线附近 EPC，并尝试匹配 Homebox 中的 O.R.B.I.T. 编号。
-4. 打开匹配物品后，可查看位置、标签、编号和 Homebox 链接。
+3. 左侧结果区可在 **Homebox** 和 **RFID** 两个标签页之间切换；两边状态相互独立。
+4. 使用 RFID 盘点读取天线附近 EPC，并尝试匹配 Homebox 中的 O.R.B.I.T. 编号。
+5. 打开匹配物品后，可查看位置、标签、编号和 Homebox 链接。
 
-找物模式仍是早期版本，后续计划接入更完整的位置树、RSSI 变化提示和数字孪生场景。
+RFID 盘点结果按已匹配物品优先、RSSI 强度优先排序；未匹配标签会保留 EPC、RSSI 和天线信息，方便判断附近是否有未登记或旧规范标签。
+
+找物模式仍在迭代，后续计划接入更完整的位置树、RSSI 变化提示和数字孪生场景。
 
 ## Homebox 约定
 
@@ -157,13 +166,27 @@ Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -Fil
 
 `General`、`AI识别`、`O.R.B.I.T.` 等系统或测试来源标签不应作为正式业务分类标签。
 
-## 标签和 RFID
+## 标签、RFID 和资产编号
 
-每个物品默认使用同一个 O.R.B.I.T. 编号，例如 `ORB-000001`。
+新入库物品使用 10 位纯数字资产码作为底层编号：
 
-- 人读 PET 标签：物品名、品牌/型号、重量、尺寸、分类标签、位置和 O.R.B.I.T. 编号。
-- AR/QR PET 标签：所有者占位、物品名、O.R.B.I.T. 编号、AR ID 图形和 Homebox 物品页二维码。
-- RFID 标签：写入 96-bit EPC，内容与 O.R.B.I.T. 编号保持一致。
+```text
+YYMMDDNNNN
+```
+
+例如 `2607060001` 表示 `2026-07-06` 当天第 `0001` 个入库物品。
+
+- Homebox `assetId`：写入纯数字资产码，例如 `2607060001`。
+- RFID EPC：写入同一个纯数字资产码的 ASCII 字节，例如 `2607060001`。
+- GUI/PET 显示码：在纯数字资产码前加显示前缀，例如 `ORB-2607060001`。
+- GUI 的“资产编号”编辑框只填写纯数字资产码，不填写 `ORB-` 显示前缀。
+- Homebox 可能会把 `assetId` 自动格式化显示，例如 `2607060001` 显示为 `260-7060001`；读取和匹配时 O.R.B.I.T. 会还原为纯数字规范码。
+
+这样 `ORB-` 只作为人读显示前缀，不占用 RFID EPC 字节；RFID 与 Homebox 仍保持同一个可互相推导的底层编号。
+
+- 人读 PET 标签：物品名、品牌/型号、重量、尺寸、分类标签、位置和显示码。
+- AR/QR PET 标签：所有者占位、物品名、显示码、AR ID 图形和 Homebox 物品页二维码。
+- RFID 标签：写入 96-bit EPC 范围内的纯数字资产码，默认 10 bytes / 80 bits。
 
 二维码当前只写入 Homebox 物品页 URL：
 
@@ -214,7 +237,7 @@ python .\VISION\main.py rfid-read --rfid-port COM3
 写入 RFID EPC：
 
 ```powershell
-python .\VISION\main.py rfid-write --rfid-port COM3 --epc-hex 4F52422D303030303031
+python .\VISION\main.py rfid-write --rfid-port COM3 --epc-hex 32363037303630303031
 ```
 
 拍摄主相机图像：
@@ -249,7 +272,7 @@ rg -n "HOMEBOX_PASSWORD|HOMEBOX_TOKEN|password|token|secret" .
 
 - D435i 深度分割对黑色、透明、反光和复杂背景物体不稳定，仍需要人工框选确认。
 - RealSense 硬件 ROI 曝光在部分设备组合上可能返回 `Invalid parameter`，当前主要使用软件曝光补偿和图像增强。
-- 本机 4GB 显存运行视觉语言模型速度有限，正式入库建议使用局域网高显存 GPU 主机上的 Ollama。
+- 本机 4GB 显存运行视觉语言模型速度有限，正式入库建议使用局域网高显存 GPU 主机上的 Ollama 或 OpenAI 兼容云端模型。
 - 视觉模型可能混淆品牌、规格和型号，入库前必须人工确认。
 - RFID 当前主要写 EPC 区，不锁卡、不写 User 区。
 - 找物模式仍处于早期阶段，RFID RSSI 定位和 3D/Unity 数字孪生尚未完整接入。

@@ -7,6 +7,7 @@ __pycache__/
 .env.*
 !.env.example
 *.local
+VISION/orbit_runtime.local.json*
 
 # Editor-local settings
 .vscode/
@@ -21,6 +22,8 @@ VISION/intake_records/
 !docs/
 !docs/assets/
 !docs/assets/*.png
+!docs/assets/*.jpg
+!docs/assets/*.jpeg
 
 # Downloaded driver archives/extractions
 VISION/drivers/

@@ -12,33 +12,82 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $stdoutLog = Join-Path $logDir "web-gui.out.log"
 $stderrLog = Join-Path $logDir "web-gui.err.log"
 
+$localConfig = @{}
+$localConfigPath = Join-Path $PSScriptRoot "orbit_runtime.local.json"
+if (Test-Path $localConfigPath) {
+    try {
+        $rawConfig = Get-Content -Raw -Encoding UTF8 $localConfigPath | ConvertFrom-Json
+        $configNode = if ($rawConfig.config) { $rawConfig.config } else { $rawConfig }
+        foreach ($property in $configNode.PSObject.Properties) {
+            if ($null -ne $property.Value -and "$($property.Value)" -ne "") {
+                $localConfig[$property.Name] = "$($property.Value)"
+            }
+        }
+    } catch {
+        Write-Warning "Failed to load local GUI config: $($_.Exception.Message)"
+    }
+}
+
+function Set-OrbitEnvDefault {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowEmptyString()][string]$Fallback,
+        [string]$ConfigKey
+    )
+    if (-not $ConfigKey) {
+        $ConfigKey = $Name.ToLowerInvariant() -replace '^orbit_', '' -replace '^ollama_', 'ollama_' -replace '^homebox_', 'homebox_' -replace '^scale_', 'scale_' -replace '^rfid_', 'rfid_'
+    }
+    if ([Environment]::GetEnvironmentVariable($Name, "Process")) {
+        return
+    }
+    if ($localConfig.ContainsKey($ConfigKey)) {
+        [Environment]::SetEnvironmentVariable($Name, $localConfig[$ConfigKey], "Process")
+        return
+    }
+    [Environment]::SetEnvironmentVariable($Name, $Fallback, "Process")
+}
+
 $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUNBUFFERED = "1"
-$env:OLLAMA_MODEL = if ($env:OLLAMA_MODEL) { $env:OLLAMA_MODEL } else { "gemma3:4b" }
-$env:OLLAMA_NUM_GPU = if ($env:OLLAMA_NUM_GPU) { $env:OLLAMA_NUM_GPU } else { "36" }
-$env:OLLAMA_NUM_CTX = if ($env:OLLAMA_NUM_CTX) { $env:OLLAMA_NUM_CTX } else { "2048" }
-$env:OLLAMA_NUM_PREDICT = if ($env:OLLAMA_NUM_PREDICT) { $env:OLLAMA_NUM_PREDICT } else { "192" }
-$env:OLLAMA_TIMEOUT = if ($env:OLLAMA_TIMEOUT) { $env:OLLAMA_TIMEOUT } else { "150" }
-$env:HOMEBOX_URL = if ($env:HOMEBOX_URL) { $env:HOMEBOX_URL } else { "http://192.168.31.3:3100" }
-$env:ORBIT_SCAN_MODE = if ($env:ORBIT_SCAN_MODE) { $env:ORBIT_SCAN_MODE } else { "auto" }
+Set-OrbitEnvDefault "OLLAMA_MODEL" "gemma3:4b" "ollama_model"
+Set-OrbitEnvDefault "OLLAMA_NUM_GPU" "36" "ollama_num_gpu"
+Set-OrbitEnvDefault "OLLAMA_NUM_CTX" "2048" "ollama_num_ctx"
+Set-OrbitEnvDefault "OLLAMA_NUM_PREDICT" "192" "num_predict"
+Set-OrbitEnvDefault "OLLAMA_TIMEOUT" "150" "ollama_timeout"
+Set-OrbitEnvDefault "OLLAMA_KEEP_ALIVE" "15m" "ollama_keep_alive"
+Set-OrbitEnvDefault "ORBIT_AI_TARGET" "local" "ai_target"
+Set-OrbitEnvDefault "ORBIT_CLOUD_PROVIDER" "openai" "cloud_provider"
+Set-OrbitEnvDefault "ORBIT_AI_API_BASE" "https://api.openai.com/v1" "ai_api_base"
+Set-OrbitEnvDefault "HOMEBOX_URL" "http://192.168.31.3:3100" "homebox_url"
+Set-OrbitEnvDefault "HOMEBOX_USERNAME" "" "homebox_username"
+Set-OrbitEnvDefault "HOMEBOX_PASSWORD" "" "homebox_password"
+Set-OrbitEnvDefault "HOMEBOX_TOKEN" "" "homebox_token"
+Set-OrbitEnvDefault "ORBIT_AI_API_KEY" "" "ai_api_key"
+Set-OrbitEnvDefault "ORBIT_SCAN_MODE" "auto" "mode"
+$env:ORBIT_SEGMENT_MAX_SIZE = if ($env:ORBIT_SEGMENT_MAX_SIZE) { $env:ORBIT_SEGMENT_MAX_SIZE } else { "960" }
 $env:ORBIT_EXPOSURE_RETRY = if ($env:ORBIT_EXPOSURE_RETRY) { $env:ORBIT_EXPOSURE_RETRY } else { "1" }
 $env:ORBIT_EXPOSURE_TARGET_MEAN = if ($env:ORBIT_EXPOSURE_TARGET_MEAN) { $env:ORBIT_EXPOSURE_TARGET_MEAN } else { "54" }
 $env:ORBIT_EXPOSURE_HIGHLIGHT_P98 = if ($env:ORBIT_EXPOSURE_HIGHLIGHT_P98) { $env:ORBIT_EXPOSURE_HIGHLIGHT_P98 } else { "242" }
 $env:ORBIT_EXPOSURE_CLIP_RATIO = if ($env:ORBIT_EXPOSURE_CLIP_RATIO) { $env:ORBIT_EXPOSURE_CLIP_RATIO } else { "0.012" }
 $env:ORBIT_AI_ENHANCE = if ($env:ORBIT_AI_ENHANCE) { $env:ORBIT_AI_ENHANCE } else { "1" }
 $env:ORBIT_AI_COMPOSITE_VIEW = if ($env:ORBIT_AI_COMPOSITE_VIEW) { $env:ORBIT_AI_COMPOSITE_VIEW } else { "0" }
-$env:ORBIT_AI_IMAGE_MAX_SIZE = if ($env:ORBIT_AI_IMAGE_MAX_SIZE) { $env:ORBIT_AI_IMAGE_MAX_SIZE } else { "0" }
+$env:ORBIT_AI_IMAGE_MAX_SIZE = if ($env:ORBIT_AI_IMAGE_MAX_SIZE) { $env:ORBIT_AI_IMAGE_MAX_SIZE } else { if ($localConfig.ContainsKey("image_max_size")) { $localConfig["image_max_size"] } else { "0" } }
 $env:ORBIT_AI_IMAGE_JPEG_QUALITY = if ($env:ORBIT_AI_IMAGE_JPEG_QUALITY) { $env:ORBIT_AI_IMAGE_JPEG_QUALITY } else { "80" }
 $env:ORBIT_EXPOSURE_ROI = if ($env:ORBIT_EXPOSURE_ROI) { $env:ORBIT_EXPOSURE_ROI } else { "0" }
-$env:ORBIT_AUX_CAMERA_ENABLED = if ($env:ORBIT_AUX_CAMERA_ENABLED) { $env:ORBIT_AUX_CAMERA_ENABLED } else { "1" }
-$env:ORBIT_AUX_CAMERA_INDEX = if ($env:ORBIT_AUX_CAMERA_INDEX) { $env:ORBIT_AUX_CAMERA_INDEX } else { "0" }
-$env:ORBIT_AUX_CAMERA_BACKEND = if ($env:ORBIT_AUX_CAMERA_BACKEND) { $env:ORBIT_AUX_CAMERA_BACKEND } else { "dshow" }
-$env:ORBIT_AUX_CAMERA_AUTO_EXPOSURE = if ($env:ORBIT_AUX_CAMERA_AUTO_EXPOSURE) { $env:ORBIT_AUX_CAMERA_AUTO_EXPOSURE } else { "1" }
-$env:ORBIT_AUX_CAMERA_CENTER_CROP = if ($env:ORBIT_AUX_CAMERA_CENTER_CROP) { $env:ORBIT_AUX_CAMERA_CENTER_CROP } else { "1" }
-$env:ORBIT_AUX_CAMERA_WARMUP_SECONDS = if ($env:ORBIT_AUX_CAMERA_WARMUP_SECONDS) { $env:ORBIT_AUX_CAMERA_WARMUP_SECONDS } else { "1.2" }
-$env:ORBIT_WRITE_RFID = if ($env:ORBIT_WRITE_RFID) { $env:ORBIT_WRITE_RFID } else { "1" }
-$env:SCALE_PORT = if ($env:SCALE_PORT) { $env:SCALE_PORT } else { "COM9" }
-$env:SCALE_BAUD = if ($env:SCALE_BAUD) { $env:SCALE_BAUD } else { "9600" }
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_ENABLED" "1" "aux_camera_enabled"
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_INDEX" "0" "aux_camera_index"
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_BACKEND" "dshow" "aux_camera_backend"
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_WIDTH" "1280" "aux_camera_width"
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_HEIGHT" "720" "aux_camera_height"
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_AUTO_EXPOSURE" "1" "aux_camera_auto_exposure"
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_CENTER_CROP" "1" "aux_camera_center_crop"
+Set-OrbitEnvDefault "ORBIT_AUX_CAMERA_WARMUP_SECONDS" "1.2" "aux_camera_warmup_seconds"
+$env:ORBIT_AUX_RECAPTURE_ON_SELECTION = if ($env:ORBIT_AUX_RECAPTURE_ON_SELECTION) { $env:ORBIT_AUX_RECAPTURE_ON_SELECTION } else { "0" }
+Set-OrbitEnvDefault "ORBIT_PRINT_LABELS" "1" "print_pet_labels"
+Set-OrbitEnvDefault "ORBIT_WRITE_RFID" "1" "write_rfid_tags"
+Set-OrbitEnvDefault "RFID_PORT" "" "rfid_port"
+Set-OrbitEnvDefault "SCALE_PORT" "COM9" "scale_port"
+Set-OrbitEnvDefault "SCALE_BAUD" "9600" "scale_baud"
 
 $existing = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
 if ($existing) {

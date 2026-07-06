@@ -25,9 +25,13 @@ const state = {
   homeboxConfigDirty: false,
   rfidInventory: null,
   labelPreview: null,
+  labelOptionDirtyUntil: 0,
   appMode: "intake",
-  findRows: [],
-  findSelectedIndex: null,
+  findDbRows: [],
+  findRfidRows: [],
+  findDbLoaded: false,
+  findActiveTab: "db",
+  findSelected: null,
   findSelectedUrl: "",
 };
 
@@ -93,6 +97,34 @@ function setChecked(id, value) {
   if (el) el.checked = value === true || value === "1" || value === 1 || value === "true";
 }
 
+function petLabelEnabled() {
+  return fieldChecked("labelPrintPet", fieldChecked("printPetLabels", true));
+}
+
+function rfidLabelEnabled() {
+  return fieldChecked("labelWriteRfid", fieldChecked("writeRfidTags", true));
+}
+
+function syncLabelOption(sourceId, targetId) {
+  const source = $(sourceId);
+  const target = $(targetId);
+  if (source && target) target.checked = source.checked;
+  state.labelOptionDirtyUntil = Date.now() + 1500;
+  scheduleSaveRuntimeConfig();
+}
+
+function applyLabelOptionState(config, force = false) {
+  const ids = ["printPetLabels", "labelPrintPet", "writeRfidTags", "labelWriteRfid"];
+  const optionsModal = $("labelOptionsModal");
+  if (!force && optionsModal && !optionsModal.hidden) return;
+  if (!force && Date.now() < state.labelOptionDirtyUntil) return;
+  if (!force && ids.some((id) => $(id) === document.activeElement)) return;
+  setChecked("printPetLabels", config.print_pet_labels ?? "1");
+  setChecked("labelPrintPet", config.print_pet_labels ?? "1");
+  setChecked("writeRfidTags", config.write_rfid_tags ?? "1");
+  setChecked("labelWriteRfid", config.write_rfid_tags ?? "1");
+}
+
 function setBusy(running) {
   ["capture", "identifySelection", "diagnose", "restartOllama"].forEach((id) => {
     $(id).disabled = running;
@@ -111,6 +143,9 @@ function setAppMode(mode) {
   document.querySelectorAll("[data-app-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.appMode === state.appMode);
   });
+  if (state.appMode === "find" && !state.findDbLoaded) {
+    window.setTimeout(runFindSearch, 0);
+  }
 }
 
 function render(payload) {
@@ -119,8 +154,8 @@ function render(payload) {
   const config = payload.config || {};
   applyConfigToControls(config);
   $("clock").textContent = fmtTime(payload.time);
-  setText("modelName", `${$("model").value || config.ollama_model || "--"} @ ${ollamaBaseUrl()}`);
-  setText("ollamaEndpoint", ollamaBaseUrl());
+  setText("modelName", `${selectedModelName() || config.ollama_model || "--"} @ ${aiEndpointLabel()}`);
+  setText("ollamaEndpoint", aiEndpointLabel());
   setText("homeboxUrl", config.homebox_url || "--");
   setText("findProfile", `${config.homebox_url || "Homebox"} · ${systemLabel(payload.system?.rfid?.available ? "RFID 可用" : "RFID 未就绪")}`);
 
@@ -143,13 +178,13 @@ function render(payload) {
   setChip("chip-scale", !!scale.connected, false, scale.connected ? "Scale OK" : "Scale");
   setChip("chip-realsense", !!system.realsense?.connected, false, "主相机");
   const selectedOllama = state.selectedOllama || system.ollama || {};
-  setChip("chip-ollama", !!selectedOllama.connected, false, "Ollama");
+  setChip("chip-ollama", !!selectedOllama.connected, false, "AI");
   setChip("chip-homebox", !!system.homebox?.connected, false, "Homebox");
   setChip("chip-rfid", !!system.rfid?.available, system.rfid?.state === "driver_error", "RFID");
 
   const serialPorts = system.serial_ports || [];
   setText("ports", serialPorts.map((p) => p.device).join(", ") || "--");
-  $("ollamaPs").textContent = selectedOllama.ps || system.ollama?.ps || "Ollama 未返回运行模型";
+  $("ollamaPs").textContent = selectedOllama.ps || system.ollama?.ps || "AI 未返回运行模型";
   renderModuleStatus(system, scale, config, payload.task || {});
   renderDevices(system, scale);
   const task = payload.task || {};
@@ -179,7 +214,7 @@ function renderDevices(system, scale) {
   const cameras = system.cameras || {};
   rows.push(deviceRow("辅助相机", !!cameras.aux_detected, cameras.message || "未检测"));
   rows.push(deviceRow("电子秤", !!scale.connected, scale.connected ? `${scale.port} · ${fmtWeight(scale.weight_g)} · ${scale.raw || ""}` : scale.error || "未连接"));
-  rows.push(deviceRow("Ollama", !!selectedOllama.connected, selectedOllama.connected ? `${ollamaBaseUrl()} · ${$("model").value || selectedOllama.model || ""}` : selectedOllama.error || "未连接"));
+  rows.push(deviceRow("AI", !!selectedOllama.connected, selectedOllama.connected ? `${aiEndpointLabel()} · ${selectedModelName() || selectedOllama.model || ""}` : selectedOllama.error || "未连接"));
   rows.push(deviceRow("Homebox", system.homebox?.connected, system.homebox?.connected ? `${system.homebox.title || "Homebox"} ${system.homebox.version || ""}` : system.homebox?.error || "未连接"));
   const rfid = system.rfid || {};
   rows.push(deviceRow("RFID", !!rfid.available, rfid.message || "未检测", rfid.state === "driver_error"));
@@ -221,19 +256,18 @@ function renderModuleStatus(system, scale, config, task) {
 
   setText("scaleConfigState", scaleOk ? `${fmtWeight(scale.weight_g)} · ${scale.stable ? "稳定" : "变化中"}` : scale.error || "未连接");
   setText("rfidConfigState", rfid.message || "未检测");
-  setText("ollamaEndpoint", ollamaBaseUrl());
-  setText("modelName", `${$("model").value || config.ollama_model || "--"} @ ${ollamaBaseUrl()}`);
+  setText("ollamaEndpoint", aiEndpointLabel());
+  setText("modelName", `${selectedModelName() || config.ollama_model || "--"} @ ${aiEndpointLabel()}`);
   const imageSize = Number(fieldValue("imageSize", config.image_max_size ?? 0));
   const imageText = imageSize > 0 ? `${imageSize}px` : "原图";
-  setText("intakeProfile", `${modeLabel(fieldValue("mode", config.mode || "auto"))} · ${$("model").value || config.ollama_model || "--"} · ${imageText}`);
+  setText("intakeProfile", `${modeLabel(fieldValue("mode", config.mode || "auto"))} · ${selectedModelName() || config.ollama_model || "--"} · ${imageText}`);
 
   populatePortSelect("scalePort", serialPorts, scale.port || config.scale_port || "auto", true);
   const configuredRfid = config.rfid_port || (rfid.ports || [])[0]?.device || "";
   populatePortSelect("rfidPort", rfid.ports && rfid.ports.length ? rfid.ports : serialPorts, configuredRfid, false);
   if ($("scaleBaud") && config.scale_baud) $("scaleBaud").value = String(config.scale_baud);
   setCameraControls(config);
-  setChecked("printPetLabels", config.print_pet_labels ?? "1");
-  setChecked("writeRfidTags", config.write_rfid_tags ?? "1");
+  applyLabelOptionState(config);
   const homeboxInput = $("homeboxConfigUrl");
   if (homeboxInput && document.activeElement !== homeboxInput) {
     homeboxInput.value = config.homebox_url || homebox.url || homeboxInput.value;
@@ -393,6 +427,7 @@ function renderTask(task, pending = null) {
 }
 
 function renderPending(pending, task = {}) {
+  const wasCommitted = state.hasCommitted;
   state.hasPending = !!pending;
   state.hasCommitted = !!pending?.committed_item;
   const running = $("cancel").disabled === false;
@@ -422,7 +457,12 @@ function renderPending(pending, task = {}) {
   showLogImage("auxPreview", "emptyAuxPreview", pending.aux_image_name, "lastAuxImage");
   if (pending.result_name) state.lastResult = pending.result_name;
   renderLabelPreview(pending.label_preview || pending.label_result || (state.pendingId === pending.id ? state.labelPreview : null));
-  if (state.pendingId === pending.id) return;
+  if (state.pendingId === pending.id) {
+    if (!wasCommitted && state.hasCommitted && pending.editable?.asset_code) {
+      $("fieldAssetCode").value = pending.editable.asset_code;
+    }
+    return;
+  }
   state.pendingId = pending.id;
 
   const editable = pending.editable || {};
@@ -433,6 +473,7 @@ function renderPending(pending, task = {}) {
   $("fieldQuantity").value = editable.quantity || 1;
   $("fieldWeight").value = editable.weight_g ?? "";
   $("fieldSize").value = editable.size || sizeFromMeasurement(editable);
+  $("fieldAssetCode").value = editable.asset_code || editable.assetId || editable.asset_id || "";
   $("fieldTags").value = editable.tags || "";
   $("fieldLocation").value = editable.suggested_location || "";
   $("fieldDescription").value = editable.description || "";
@@ -626,6 +667,7 @@ function setEditorEnabled(enabled, clearValues = false) {
     "fieldQuantity",
     "fieldWeight",
     "fieldSize",
+    "fieldAssetCode",
     "fieldTags",
     "fieldLocation",
     "fieldDescription",
@@ -772,6 +814,16 @@ function selectedOllamaTarget() {
   return document.querySelector('input[name="ollamaTarget"]:checked')?.value || "local";
 }
 
+function selectedAiProvider() {
+  return selectedOllamaTarget() === "cloud" ? fieldValue("cloudProvider", "openai") : "ollama";
+}
+
+function defaultCloudBase(provider = "openai") {
+  return provider === "gemini"
+    ? "https://generativelanguage.googleapis.com/v1beta/openai"
+    : "https://api.openai.com/v1";
+}
+
 function normalizeOllamaHost(value) {
   let text = String(value || "").trim();
   if (!text) return "http://127.0.0.1:11434";
@@ -797,6 +849,32 @@ function ollamaChatUrl() {
   return `${ollamaBaseUrl()}/api/chat`;
 }
 
+function normalizeCloudBase(value, provider = "openai") {
+  let text = String(value || "").trim() || defaultCloudBase(provider);
+  if (!/^https?:\/\//i.test(text)) text = `https://${text}`;
+  try {
+    const url = new URL(text);
+    url.hash = "";
+    url.search = "";
+    let path = url.pathname.replace(/\/+$/, "");
+    path = path.replace(/\/chat\/completions$/i, "");
+    url.pathname = path || "/";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return defaultCloudBase(provider);
+  }
+}
+
+function selectedModelName() {
+  return fieldValue("modelManual", "") || fieldValue("model", "gemma3:4b");
+}
+
+function aiEndpointLabel() {
+  if (selectedAiProvider() === "ollama") return ollamaBaseUrl();
+  const provider = fieldValue("cloudProvider", "openai");
+  return `${provider} @ ${normalizeCloudBase(fieldValue("cloudApiBase", ""), provider)}`;
+}
+
 function applyConfigToControls(config) {
   if (!config || state.controlsHydrated) return;
   state.controlsHydrated = true;
@@ -807,23 +885,27 @@ function applyConfigToControls(config) {
   if (config.homebox_username && $("homeboxUsername")) $("homeboxUsername").value = config.homebox_username;
   if (config.scale_baud && $("scaleBaud")) $("scaleBaud").value = String(config.scale_baud);
   setCameraControls(config);
-  setChecked("printPetLabels", config.print_pet_labels ?? "1");
-  setChecked("writeRfidTags", config.write_rfid_tags ?? "1");
+  applyLabelOptionState(config, true);
 
   const base = normalizeOllamaHost(config.ollama_url || "");
   const localBases = new Set(["http://127.0.0.1:11434", "http://localhost:11434"]);
-  const target = localBases.has(base) ? "local" : "lan";
+  const target = config.ai_target || (localBases.has(base) ? "local" : "lan");
   const radio = document.querySelector(`input[name="ollamaTarget"][value="${target}"]`);
   if (radio) radio.checked = true;
   if (target === "lan" && $("ollamaLanHost")) $("ollamaLanHost").value = base;
-  $("ollamaLanHost").disabled = target !== "lan";
-  refreshModels(config.ollama_model || null);
+  if ($("cloudProvider")) $("cloudProvider").value = config.cloud_provider || "openai";
+  if ($("cloudApiBase")) $("cloudApiBase").value = config.ai_api_base || defaultCloudBase(fieldValue("cloudProvider", "openai"));
+  if ($("cloudApiKey")) {
+    $("cloudApiKey").placeholder = config.ai_has_api_key ? "已保存，留空则继续使用" : "只保存在当前运行进程中";
+  }
+  if ($("modelManual")) $("modelManual").value = config.ollama_model || "gemma3:4b";
+  updateOllamaControls(false);
   loadHomeboxOptions();
 }
 
 function setModelOptions(models, preferred = null) {
   const modelSelect = $("model");
-  const current = preferred || modelSelect.value;
+  const current = preferred || selectedModelName();
   const list = Array.isArray(models) && models.length ? models : [current || "gemma3:4b"];
   modelSelect.innerHTML = "";
   list.forEach((name) => {
@@ -833,41 +915,59 @@ function setModelOptions(models, preferred = null) {
     modelSelect.appendChild(option);
   });
   if (list.includes(current)) modelSelect.value = current;
+  if ($("modelManual") && preferred) $("modelManual").value = preferred;
 }
 
 async function refreshModels(preferred = null) {
-  const endpoint = ollamaBaseUrl();
-  state.modelEndpoint = endpoint;
+  const provider = selectedAiProvider();
+  const endpoint = provider === "ollama"
+    ? ollamaBaseUrl()
+    : normalizeCloudBase(fieldValue("cloudApiBase", ""), fieldValue("cloudProvider", "openai"));
+  const endpointKey = `${provider}:${endpoint}`;
+  state.modelEndpoint = endpointKey;
   const modelSelect = $("model");
-  const previous = preferred || modelSelect.value;
+  const previous = preferred || selectedModelName();
   modelSelect.disabled = true;
   try {
-    const data = await fetch(`/api/ollama/models?url=${encodeURIComponent(endpoint)}`, { cache: "no-store" }).then((r) => r.json());
-    if (state.modelEndpoint !== endpoint) return;
+    const data = await post("/api/ai/models", {
+      provider,
+      base_url: endpoint,
+      api_key: provider === "ollama" ? "" : fieldValue("cloudApiKey", ""),
+    });
+    if (state.modelEndpoint !== endpointKey) return;
     if (data.ok) {
       state.selectedOllama = { connected: true, models: data.models || [], ps: data.ps || "", error: null };
       setModelOptions(data.models || [], previous);
-      $("ollamaPs").textContent = data.ps || "Ollama 未返回运行模型";
-      setChip("chip-ollama", true, false, "Ollama");
+      $("ollamaPs").textContent = data.ps || (provider === "ollama" ? "Ollama 未返回运行模型" : "云端模型列表已读取");
+      setChip("chip-ollama", true, false, "AI");
     } else {
       state.selectedOllama = { connected: false, models: [], ps: "", error: data.message || "未连接" };
       appendLog(data.message || "模型列表读取失败");
       setModelOptions([previous || "gemma3:4b"], previous);
-      setChip("chip-ollama", false, false, "Ollama");
+      setChip("chip-ollama", false, false, "AI");
     }
   } catch (err) {
     state.selectedOllama = { connected: false, models: [], ps: "", error: String(err) };
     appendLog(`模型列表读取失败: ${err}`);
     setModelOptions([previous || "gemma3:4b"], previous);
-    setChip("chip-ollama", false, false, "Ollama");
+    setChip("chip-ollama", false, false, "AI");
   } finally {
-    if (state.modelEndpoint === endpoint) modelSelect.disabled = false;
+    if (state.modelEndpoint === endpointKey) modelSelect.disabled = false;
   }
 }
 
 function updateOllamaControls(save = true) {
-  const lan = selectedOllamaTarget() === "lan";
+  const target = selectedOllamaTarget();
+  const lan = target === "lan";
+  const cloud = target === "cloud";
   $("ollamaLanHost").disabled = !lan;
+  ["cloudProvider", "cloudApiBase", "cloudApiKey"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = !cloud;
+  });
+  if (cloud && $("cloudApiBase") && !$("cloudApiBase").value.trim()) {
+    $("cloudApiBase").value = defaultCloudBase(fieldValue("cloudProvider", "openai"));
+  }
   refreshModels();
   if (save) scheduleSaveRuntimeConfig();
 }
@@ -879,8 +979,12 @@ function modePayload(extra = {}) {
     homebox_username: fieldValue("homeboxUsername", ""),
     homebox_password: fieldValue("homeboxPassword", ""),
     homebox_token: fieldValue("homeboxToken", ""),
+    ai_target: selectedOllamaTarget(),
+    cloud_provider: fieldValue("cloudProvider", "openai"),
+    ai_api_base: normalizeCloudBase(fieldValue("cloudApiBase", ""), fieldValue("cloudProvider", "openai")),
+    ai_api_key: fieldValue("cloudApiKey", ""),
     ollama_url: ollamaChatUrl(),
-    model: $("model").value,
+    model: selectedModelName(),
     num_predict: Number($("tokens").value),
     image_max_size: Number($("imageSize").value),
     scale_port: fieldValue("scalePort", "auto"),
@@ -907,8 +1011,12 @@ function runtimeConfigPayload() {
     homebox_username: fieldValue("homeboxUsername", ""),
     homebox_password: fieldValue("homeboxPassword", ""),
     homebox_token: fieldValue("homeboxToken", ""),
+    ai_target: selectedOllamaTarget(),
+    cloud_provider: fieldValue("cloudProvider", "openai"),
+    ai_api_base: normalizeCloudBase(fieldValue("cloudApiBase", ""), fieldValue("cloudProvider", "openai")),
+    ai_api_key: fieldValue("cloudApiKey", ""),
     ollama_url: ollamaChatUrl(),
-    ollama_model: fieldValue("model", "gemma3:4b"),
+    ollama_model: selectedModelName(),
     num_predict: Number(fieldValue("tokens", "192")),
     image_max_size: Number(fieldValue("imageSize", "0")),
     scale_port: fieldValue("scalePort", "auto"),
@@ -970,61 +1078,132 @@ function itemSubtitle(item) {
   return parts.join(" · ") || item.description || "--";
 }
 
-function renderFindResults(rows, message = "") {
-  state.findRows = rows || [];
-  state.findSelectedIndex = null;
+function clearFindDetail(message = "选择一个物品查看位置、标签和识别信息") {
+  state.findSelected = null;
   state.findSelectedUrl = "";
   $("findOpenHomebox").disabled = true;
-  $("findCount").textContent = message || `${state.findRows.length} 项`;
-  if (!state.findRows.length) {
-    $("findResults").innerHTML = `<div class="empty-state">没有结果</div>`;
-    $("findDetail").innerHTML = `<div class="empty-state">选择一个物品查看位置、标签和识别信息</div>`;
+  $("findDetail").innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
+  document.querySelectorAll(".find-item").forEach((button) => button.classList.remove("active"));
+}
+
+function rfidStrength(row) {
+  const value = Number(row?.rssi_dbm);
+  return Number.isFinite(value) ? value : -999;
+}
+
+function normalizedRfidRows(rows) {
+  return (rows || [])
+    .map((row) => ({ ...row, kind: "rfid" }))
+    .sort((a, b) => {
+      const matchedDelta = Number(Boolean(b.item || b.matched)) - Number(Boolean(a.item || a.matched));
+      if (matchedDelta) return matchedDelta;
+      return rfidStrength(b) - rfidStrength(a);
+    });
+}
+
+function setFindTab(source, selectFirst = false) {
+  const tab = source === "rfid" ? "rfid" : "db";
+  state.findActiveTab = tab;
+  document.querySelectorAll("[data-find-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.findTab === tab);
+  });
+  document.querySelectorAll("[data-find-panel]").forEach((panel) => {
+    const active = panel.dataset.findPanel === tab;
+    panel.hidden = !active;
+    panel.classList.toggle("active", active);
+  });
+  if (!selectFirst) return;
+  const rows = tab === "rfid" ? state.findRfidRows : state.findDbRows;
+  if (rows.length) {
+    selectFindRow(tab, 0);
+  } else if (!state.findSelected || state.findSelected.source === tab) {
+    clearFindDetail(tab === "rfid" ? "尚未盘点 RFID 标签" : "没有选中的 Homebox 物品");
+  }
+}
+
+function renderFindList(targetId, rows, source, emptyText) {
+  const target = $(targetId);
+  if (!rows.length) {
+    target.innerHTML = `<div class="empty-state">${escapeHtml(emptyText)}</div>`;
     return;
   }
-  $("findResults").innerHTML = state.findRows
+  target.innerHTML = rows
     .map((row, index) => {
-      const item = row.kind === "rfid" ? row.item : row;
+      const item = source === "rfid" ? row.item : row;
       if (!item) {
         const rssi = row.rssi_dbm === null || row.rssi_dbm === undefined ? "--" : `${row.rssi_dbm} dBm`;
+        const epcText = row.epc_ascii || row.epc || "--";
         return `
-          <button class="find-item" data-find-index="${index}">
+          <button class="find-item" data-find-source="${source}" data-find-index="${index}">
             <strong>未匹配 RFID 标签</strong>
-            <span>${escapeHtml(row.epc_ascii || row.epc || "--")}</span>
-            <small>RSSI ${escapeHtml(rssi)}</small>
+            <span>${escapeHtml(epcText)}</span>
+            <small>RSSI ${escapeHtml(rssi)} · 天线 ${escapeHtml(row.antenna ?? "--")}</small>
           </button>
         `;
       }
-      const rfidText = row.kind === "rfid" ? ` · RSSI ${row.rssi_dbm ?? "--"} dBm` : "";
+      const rfidText = source === "rfid" ? ` · RSSI ${row.rssi_dbm ?? "--"} dBm` : "";
       return `
-        <button class="find-item" data-find-index="${index}">
-          <strong>${escapeHtml(item.name)}</strong>
+        <button class="find-item" data-find-source="${source}" data-find-index="${index}">
+          <strong>${escapeHtml(item.name || "未命名物品")}</strong>
           <span>${escapeHtml(itemSubtitle(item))}</span>
-          <small class="${row.kind === "rfid" ? "rfid-hit" : ""}">${escapeHtml(item.code || item.rfid_code || item.id)}${escapeHtml(rfidText)}</small>
+          <small class="${source === "rfid" ? "rfid-hit" : ""}">${escapeHtml(item.code || item.rfid_code || item.id || "--")}${escapeHtml(rfidText)}</small>
         </button>
       `;
     })
     .join("");
 }
 
-async function selectFindRow(index) {
-  const row = state.findRows[index];
-  state.findSelectedIndex = index;
+function renderFindDbResults(rows, message = "", emptyText = "没有 Homebox 结果") {
+  state.findDbRows = rows || [];
+  state.findDbLoaded = true;
+  setFindTab("db");
+  $("findCount").textContent = message || `${state.findDbRows.length} 项`;
+  renderFindList("findResults", state.findDbRows, "db", emptyText);
+  if (state.findDbRows.length) {
+    window.setTimeout(() => selectFindRow("db", 0), 0);
+  } else if (!state.findSelected || state.findSelected.source === "db") {
+    clearFindDetail("没有选中的 Homebox 物品");
+  }
+}
+
+function renderFindRfidResults(rows, message = "", emptyText = "未读到 RFID 标签") {
+  state.findRfidRows = normalizedRfidRows(rows);
+  setFindTab("rfid");
+  $("findRfidCount").textContent = message || `${state.findRfidRows.length} 个标签`;
+  renderFindList("findRfidResults", state.findRfidRows, "rfid", emptyText);
+  if (state.findRfidRows.length) {
+    window.setTimeout(() => selectFindRow("rfid", 0), 0);
+  } else if (!state.findSelected) {
+    clearFindDetail();
+  }
+}
+
+async function selectFindRow(source, index) {
+  const normalizedSource = source === "rfid" ? "rfid" : "db";
+  const rows = normalizedSource === "rfid" ? state.findRfidRows : state.findDbRows;
+  const row = rows[index];
+  state.findSelected = { source: normalizedSource, index };
   document.querySelectorAll(".find-item").forEach((button) => {
-    button.classList.toggle("active", Number(button.dataset.findIndex) === index);
+    button.classList.toggle(
+      "active",
+      button.dataset.findSource === normalizedSource && Number(button.dataset.findIndex) === index,
+    );
   });
   if (!row) return;
-  const item = row.kind === "rfid" ? row.item : row;
+  const item = normalizedSource === "rfid" ? row.item : row;
   if (!item) {
     renderFindRfidOnly(row);
     return;
   }
   let detail = item;
   if (item.id) {
+    const selectedKey = `${normalizedSource}:${index}`;
     const data = await post("/api/find/item", { id: item.id });
+    if (!state.findSelected || `${state.findSelected.source}:${state.findSelected.index}` !== selectedKey) return;
     if (data.ok && data.item) detail = data.item;
     else appendLog(data.message || "物品详情读取失败");
   }
-  renderFindDetail(detail, row.kind === "rfid" ? row : null);
+  renderFindDetail(detail, normalizedSource === "rfid" ? row : null);
 }
 
 function renderFindRfidOnly(tag) {
@@ -1085,15 +1264,14 @@ async function runFindSearch() {
   $("findCount").textContent = "搜索中...";
   const data = await post("/api/find/search", { q: query, limit });
   appendLog(data.message || (data.ok ? "找物搜索完成" : "找物搜索失败"));
-  renderFindResults(data.items || [], data.message || "");
+  renderFindDbResults(data.items || [], data.message || "");
 }
 
 async function runFindRfidScan() {
-  $("findCount").textContent = "盘点中...";
+  $("findRfidCount").textContent = "盘点中...";
   const data = await post("/api/find/rfid", runtimeConfigPayload());
   appendLog(data.message || (data.ok ? "RFID 找物完成" : "RFID 找物失败"));
-  const rows = (data.tags || []).map((tag) => ({ ...tag, kind: "rfid" }));
-  renderFindResults(rows, data.message || "");
+  renderFindRfidResults(data.tags || [], data.message || "");
 }
 
 function logImageUrl(nameOrPath) {
@@ -1142,6 +1320,7 @@ function collectPendingFields() {
     quantity: Number($("fieldQuantity").value || 1),
     weight_g: $("fieldWeight").value === "" ? null : Number($("fieldWeight").value),
     size: $("fieldSize").value.trim(),
+    asset_code: $("fieldAssetCode").value.trim(),
     tags: $("fieldTags").value.trim(),
     suggested_location: $("fieldLocation").value.trim(),
     description: $("fieldDescription").value.trim(),
@@ -1289,6 +1468,32 @@ function openRfidConfirm(data) {
   });
 }
 
+function openLabelOptions() {
+  const modal = $("labelOptionsModal");
+  if (!modal) return Promise.resolve({ printPet: petLabelEnabled(), writeRfid: rfidLabelEnabled() });
+  setChecked("labelPrintPet", true);
+  setChecked("labelWriteRfid", true);
+  modal.hidden = false;
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      modal.hidden = true;
+      $("labelOptionsClose").onclick = null;
+      $("labelOptionsContinue").onclick = null;
+      resolve(value);
+    };
+    $("labelOptionsClose").onclick = () => finish(null);
+    $("labelOptionsContinue").onclick = () => {
+      const printPet = petLabelEnabled();
+      const writeRfid = rfidLabelEnabled();
+      if (!printPet && !writeRfid) {
+        appendLog("请至少选择 PET 标签或 RFID 标签。");
+        return;
+      }
+      finish({ printPet, writeRfid });
+    };
+  });
+}
+
 function attachHandlers() {
   document.querySelectorAll("[data-app-mode]").forEach((button) => {
     button.addEventListener("click", () => setAppMode(button.dataset.appMode || "intake"));
@@ -1298,6 +1503,20 @@ function attachHandlers() {
   });
   document.querySelectorAll('input[name="ollamaTarget"]').forEach((el) => {
     el.addEventListener("change", updateOllamaControls);
+  });
+  $("cloudProvider").addEventListener("change", () => {
+    $("cloudApiBase").value = defaultCloudBase(fieldValue("cloudProvider", "openai"));
+    updateOllamaControls();
+  });
+  ["cloudApiBase", "cloudApiKey"].forEach((id) => {
+    $(id).addEventListener("change", () => {
+      refreshModels();
+      scheduleSaveRuntimeConfig();
+    });
+    $(id).addEventListener("blur", () => {
+      refreshModels();
+      scheduleSaveRuntimeConfig();
+    });
   });
   $("ollamaLanHost").addEventListener("change", () => {
     refreshModels();
@@ -1314,7 +1533,18 @@ function attachHandlers() {
   $("findRfidScan").addEventListener("click", runFindRfidScan);
   $("findClear").addEventListener("click", () => {
     $("findQuery").value = "";
-    renderFindResults([], "--");
+    state.findDbRows = [];
+    state.findRfidRows = [];
+    state.findDbLoaded = false;
+    $("findCount").textContent = "--";
+    $("findRfidCount").textContent = "未盘点";
+    $("findResults").innerHTML = `<div class="empty-state">输入关键词搜索数据库</div>`;
+    $("findRfidResults").innerHTML = `<div class="empty-state">点击扫 RFID 读取附近标签</div>`;
+    setFindTab("db");
+    clearFindDetail();
+  });
+  document.querySelectorAll("[data-find-tab]").forEach((button) => {
+    button.addEventListener("click", () => setFindTab(button.dataset.findTab || "db", true));
   });
   $("findQuery").addEventListener("keydown", (event) => {
     if (event.key === "Enter") runFindSearch();
@@ -1322,7 +1552,12 @@ function attachHandlers() {
   $("findResults").addEventListener("click", (event) => {
     const button = event.target.closest("[data-find-index]");
     if (!button) return;
-    selectFindRow(Number(button.dataset.findIndex));
+    selectFindRow(button.dataset.findSource || "db", Number(button.dataset.findIndex));
+  });
+  $("findRfidResults").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-find-index]");
+    if (!button) return;
+    selectFindRow(button.dataset.findSource || "rfid", Number(button.dataset.findIndex));
   });
   $("findOpenHomebox").addEventListener("click", () => {
     if (state.findSelectedUrl) window.open(state.findSelectedUrl, "_blank", "noopener");
@@ -1330,6 +1565,7 @@ function attachHandlers() {
   [
     "mode",
     "model",
+    "modelManual",
     "tokens",
     "imageSize",
     "scalePort",
@@ -1348,6 +1584,18 @@ function attachHandlers() {
   ].forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener("change", scheduleSaveRuntimeConfig);
+  });
+  $("model").addEventListener("change", () => {
+    $("modelManual").value = $("model").value;
+    scheduleSaveRuntimeConfig();
+  });
+  $("modelManual").addEventListener("blur", scheduleSaveRuntimeConfig);
+  [
+    ["printPetLabels", "labelPrintPet"],
+    ["writeRfidTags", "labelWriteRfid"],
+  ].forEach(([sourceId, targetId]) => {
+    const el = $(sourceId);
+    if (el) el.addEventListener("change", () => syncLabelOption(sourceId, targetId));
   });
   ["homeboxConfigUrl", "homeboxUsername", "homeboxPassword", "homeboxToken"].forEach((id) => {
     $(id).addEventListener("change", () => {
@@ -1425,16 +1673,42 @@ function attachHandlers() {
     if (!confirm("确认按当前表单写入 Homebox？")) return;
     const data = await post("/api/commit", fields);
     appendLog(data.message || (data.ok ? "入库完成" : "入库失败"));
+    if (data.task?.pending_item?.editable?.asset_code) {
+      $("fieldAssetCode").value = data.task.pending_item.editable.asset_code;
+    }
+    await refreshStatusNow();
   });
   $("labelWrite").addEventListener("click", async () => {
     if (!state.hasCommitted) {
       appendLog("请先入库，再写标签。");
       return;
     }
+    const labelOptions = await openLabelOptions();
+    if (!labelOptions) return;
+    const { printPet, writeRfid } = labelOptions;
+    if (!printPet && !writeRfid) {
+      appendLog("请至少选择 PET 标签或 RFID 标签。");
+      return;
+    }
+    let configSave = null;
+    try {
+      configSave = await post("/api/config", {
+        ...runtimeConfigPayload(),
+        print_pet_labels: printPet,
+        write_rfid_tags: writeRfid,
+      });
+    } catch (err) {
+      appendLog(`写标签配置保存失败: ${err}`);
+      return;
+    }
+    if (configSave && configSave.ok === false) {
+      appendLog("写标签配置保存失败，已取消。");
+      return;
+    }
     const preview = await fetchLabelPreview();
     if (!preview) return;
     let rfidTargetEpc = null;
-    if (fieldChecked("writeRfidTags", true)) {
+    if (writeRfid) {
       const inventory = await fetchRfidInventoryForConfirm();
       if (!inventory || !(inventory.tags || []).length) return;
       rfidTargetEpc = await openRfidConfirm(inventory);
@@ -1442,10 +1716,14 @@ function attachHandlers() {
         appendLog("已取消 RFID 写入");
         return;
       }
-    } else if (!confirm("按当前配置打印 PET 标签？")) {
+    } else if (printPet && !confirm("只打印 PET 标签？")) {
       return;
     }
-    const data = await post("/api/write_labels", { rfid_target_epc: rfidTargetEpc });
+    const data = await post("/api/write_labels", {
+      print_pet_labels: printPet,
+      write_rfid_tags: writeRfid,
+      rfid_target_epc: rfidTargetEpc,
+    });
     appendLog(data.message || (data.ok ? "写标签完成" : "写标签失败"));
     if (data.result?.label) renderLabelPreview(data.result.label);
   });

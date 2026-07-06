@@ -25,6 +25,9 @@ DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/cha
 DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
 DEFAULT_OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 DEFAULT_OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "192"))
+DEFAULT_AI_PROVIDER = os.getenv("ORBIT_AI_PROVIDER", "ollama")
+DEFAULT_AI_API_BASE = os.getenv("ORBIT_AI_API_BASE", "")
+DEFAULT_AI_API_KEY = os.getenv("ORBIT_AI_API_KEY", "") or os.getenv("OPENAI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
 SCAN_MODES = ["scale", "auto", "full", "macro", "furniture"]
 DEFAULT_SCAN_MODE = os.getenv("ORBIT_SCAN_MODE", os.getenv("SCAN_MODE", "auto"))
 if DEFAULT_SCAN_MODE not in SCAN_MODES:
@@ -42,6 +45,9 @@ def build_parser():
         p.add_argument("--homebox-password", default=os.getenv("HOMEBOX_PASSWORD"))
         p.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
         p.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL)
+        p.add_argument("--ai-provider", default=DEFAULT_AI_PROVIDER)
+        p.add_argument("--ai-api-base", default=DEFAULT_AI_API_BASE)
+        p.add_argument("--ai-api-key", default=DEFAULT_AI_API_KEY)
         p.add_argument("--ollama-timeout", type=int, default=int(os.getenv("OLLAMA_TIMEOUT", "150")))
         p.add_argument("--ollama-num-gpu", type=int, default=int(os.getenv("OLLAMA_NUM_GPU")) if os.getenv("OLLAMA_NUM_GPU") else None)
         p.add_argument("--ollama-num-ctx", type=int, default=DEFAULT_OLLAMA_NUM_CTX)
@@ -223,6 +229,9 @@ def make_scanner(args) -> IntelligentScanner:
         ollama_num_gpu=args.ollama_num_gpu,
         ollama_num_ctx=args.ollama_num_ctx,
         ollama_num_predict=args.ollama_num_predict,
+        ai_provider=args.ai_provider,
+        ai_api_base=args.ai_api_base,
+        ai_api_key=args.ai_api_key,
     )
     scanner.ai_image_max_size = args.ai_image_max_size
     scanner.ai_image_jpeg_quality = args.ai_image_jpeg_quality
@@ -233,10 +242,14 @@ def make_ai_only_scanner(args) -> IntelligentScanner:
     scanner = object.__new__(IntelligentScanner)
     scanner.ollama_model = args.ollama_model
     scanner.ollama_api_url = args.ollama_url
+    scanner.ai_provider = (args.ai_provider or DEFAULT_AI_PROVIDER or "ollama").strip().lower()
+    scanner.ai_api_base = (args.ai_api_base or DEFAULT_AI_API_BASE or "").strip()
+    scanner.ai_api_key = (args.ai_api_key or DEFAULT_AI_API_KEY or "").strip()
     scanner.ollama_timeout = args.ollama_timeout
     scanner.ollama_num_gpu = args.ollama_num_gpu
     scanner.ollama_num_ctx = args.ollama_num_ctx
     scanner.ollama_num_predict = args.ollama_num_predict
+    scanner.ollama_keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "15m")
     scanner.ai_composite_view = os.getenv("ORBIT_AI_COMPOSITE_VIEW", "0") != "0"
     scanner.ai_image_max_size = args.ai_image_max_size
     scanner.ai_image_jpeg_quality = args.ai_image_jpeg_quality
@@ -374,7 +387,7 @@ def cmd_identify_image(args):
         context_image=image if bbox else None,
         selection_bbox=bbox,
     )
-    ai_data = scanner.normalize_ai_data(scanner.parse_ai_json(ai_response))
+    ai_data = scanner.normalize_ai_data(scanner.parse_ai_json(ai_response), labels=labels, locations=locations)
     if not ai_data:
         print("识别失败：未获得有效 AI JSON")
         return
@@ -393,6 +406,12 @@ def cmd_identify_selection_live(args):
 
     base_measurement = load_measurement(args.measurement_json)
     scanner = make_scanner(args)
+    reuse_aux_image = (
+        bool(args.aux_image)
+        and os.getenv("ORBIT_AUX_RECAPTURE_ON_SELECTION", "0") == "0"
+    )
+    if reuse_aux_image:
+        scanner.aux_camera_enabled = False
     source_image = None
     live_measurement = {}
     try:
@@ -402,6 +421,10 @@ def cmd_identify_selection_live(args):
             selection_bbox=bbox,
         )
         aux_image = scanner.last_aux_image
+        if aux_image is None and args.aux_image:
+            aux_image = cv2.imread(str(Path(args.aux_image)))
+            if reuse_aux_image and aux_image is not None:
+                print("⏱️ 已复用第一次拍照的辅助视角，跳过 C270 重采集")
         if source_image is not None:
             source_path = save_scan_image(source_image)
             print(f"capture image saved: {source_path}")
@@ -439,7 +462,7 @@ def cmd_identify_selection_live(args):
         context_image=source_image,
         selection_bbox=bbox,
     )
-    ai_data = scanner.normalize_ai_data(scanner.parse_ai_json(ai_response))
+    ai_data = scanner.normalize_ai_data(scanner.parse_ai_json(ai_response), labels=labels, locations=locations)
     if not ai_data:
         print("识别失败：未获得有效 AI JSON")
         return

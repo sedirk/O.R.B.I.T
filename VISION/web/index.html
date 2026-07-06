@@ -23,7 +23,7 @@
     <div class="chips">
       <span class="chip" id="chip-realsense">主相机</span>
       <span class="chip" id="chip-scale">Scale</span>
-      <span class="chip" id="chip-ollama">Ollama</span>
+      <span class="chip" id="chip-ollama">AI</span>
       <span class="chip" id="chip-homebox">Homebox</span>
       <span class="chip" id="chip-rfid">RFID</span>
     </div>
@@ -107,6 +107,7 @@
           <label>数量<input id="fieldQuantity" type="number" min="1" step="1"></label>
           <label>重量 g<input id="fieldWeight" type="number" step="0.1"></label>
           <label>尺寸<input id="fieldSize" autocomplete="off"></label>
+          <label>资产编号<input id="fieldAssetCode" autocomplete="off" placeholder="YYMMDDNNNN"></label>
           <label class="span-2">分类标签
             <div class="combo-row">
               <input id="fieldTags" autocomplete="off">
@@ -172,18 +173,31 @@
       <div class="find-toolbar">
         <input id="findQuery" class="find-input" placeholder="搜索名称、标签、位置、ORB 编号或 Homebox ID" autocomplete="off">
         <button id="findSearch" class="button primary"><span>◇</span>搜索</button>
-        <button id="findRfidScan" class="button secondary"><span>▣</span>扫 RFID</button>
+        <button id="findRfidScan" class="button secondary"><span>▣</span>盘点 RFID</button>
         <button id="findClear" class="button ghost"><span>×</span>清空</button>
       </div>
 
       <div class="find-surface">
         <div class="find-results">
-          <div class="list-head">
-            <span>结果</span>
-            <strong id="findCount">--</strong>
+          <div class="find-source-tabs" role="tablist" aria-label="找物来源">
+            <button class="find-source-tab active" type="button" data-find-tab="db">
+              <span>Homebox</span>
+              <strong id="findCount">--</strong>
+            </button>
+            <button class="find-source-tab" type="button" data-find-tab="rfid">
+              <span>RFID</span>
+              <strong id="findRfidCount">未盘点</strong>
+            </button>
           </div>
-          <div id="findResults" class="find-list">
-            <div class="empty-state">输入关键词或盘点 RFID</div>
+          <div class="find-result-group active" data-find-panel="db">
+            <div id="findResults" class="find-list">
+              <div class="empty-state">输入关键词搜索数据库</div>
+            </div>
+          </div>
+          <div class="find-result-group" data-find-panel="rfid" hidden>
+            <div id="findRfidResults" class="find-list">
+              <div class="empty-state">点击扫 RFID 读取附近标签</div>
+            </div>
           </div>
         </div>
         <div class="find-detail">
@@ -294,10 +308,11 @@
 
           <section class="module-page" data-module-page="ai">
             <div class="settings-grid">
-              <label class="span-2">Ollama 机器
-                <div class="radio-group wide" aria-label="Ollama 机器">
+              <label class="span-2">AI 位置
+                <div class="radio-group wide" aria-label="AI 位置">
                   <label><input type="radio" name="ollamaTarget" value="local" checked> 本机</label>
                   <label><input type="radio" name="ollamaTarget" value="lan"> 局域网</label>
+                  <label><input type="radio" name="ollamaTarget" value="cloud"> 云端</label>
                 </div>
               </label>
               <label class="span-2">局域网地址
@@ -307,10 +322,25 @@
                 <option value="192.168.31.164:11434"></option>
                 <option value="192.168.31.164"></option>
               </datalist>
+              <label>云端协议
+                <select id="cloudProvider">
+                  <option value="openai">OpenAI</option>
+                  <option value="gemini">Gemini · OpenAI 兼容</option>
+                </select>
+              </label>
+              <label>云端 Base URL
+                <input id="cloudApiBase" class="host-input full" value="https://api.openai.com/v1">
+              </label>
+              <label class="span-2">云端 API Key
+                <input id="cloudApiKey" type="password" autocomplete="off" placeholder="保存到本机本地配置">
+              </label>
               <label class="span-2">模型
                 <select id="model">
                   <option value="gemma3:4b">gemma3:4b</option>
                 </select>
+              </label>
+              <label class="span-2">模型名
+                <input id="modelManual" autocomplete="off" value="gemma3:4b">
               </label>
               <label>输出
                 <select id="tokens">
@@ -437,6 +467,30 @@
       <div class="modal-actions">
         <button id="rfidConfirmRefresh" class="mini-button">重新盘点</button>
         <button id="rfidConfirmWrite" class="button primary">确认写入选中标签</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="labelOptionsModal" class="modal-backdrop" hidden>
+    <div class="modal-panel small-modal" role="dialog" aria-modal="true" aria-labelledby="labelOptionsTitle">
+      <div class="modal-head">
+        <h2 id="labelOptionsTitle">写标签</h2>
+        <button id="labelOptionsClose" class="mini-button">取消</button>
+      </div>
+      <div class="modal-body">
+        <div class="label-option-list">
+          <label class="check-field">
+            <input id="labelPrintPet" type="checkbox" checked>
+            <span>PET 标签</span>
+          </label>
+          <label class="check-field">
+            <input id="labelWriteRfid" type="checkbox" checked>
+            <span>RFID 标签</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="labelOptionsContinue" class="button primary">继续</button>
       </div>
     </div>
   </div>

@@ -2,7 +2,6 @@ import pyrealsense2 as rs
 import numpy as np
 import cv2
 import time
-import open3d as o3d  # 新增：3D 处理库
 import base64
 import requests
 import json
@@ -10,7 +9,27 @@ import os
 import sys
 import re
 from pathlib import Path
-from rembg import remove
+
+_OPEN3D = None
+_REMBG_REMOVE = None
+
+
+def _open3d():
+    global _OPEN3D
+    if _OPEN3D is None:
+        import open3d as open3d_module
+
+        _OPEN3D = open3d_module
+    return _OPEN3D
+
+
+def _remove_background(image_rgb):
+    global _REMBG_REMOVE
+    if _REMBG_REMOVE is None:
+        from rembg import remove as remove_background
+
+        _REMBG_REMOVE = remove_background
+    return _REMBG_REMOVE(image_rgb)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -23,13 +42,19 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
 
 # 2. 强制使用 Chat 接口 (视觉模型的标准)
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/chat")
+AI_PROVIDER = os.getenv("ORBIT_AI_PROVIDER", "ollama").strip().lower()
+AI_API_BASE = os.getenv("ORBIT_AI_API_BASE", "").strip()
+AI_API_KEY = os.getenv("ORBIT_AI_API_KEY", "").strip()
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "150"))
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 OLLAMA_NUM_GPU = os.getenv("OLLAMA_NUM_GPU", "36")
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "192"))
+CLOUD_MAX_TOKENS = int(os.getenv("ORBIT_CLOUD_MAX_TOKENS", "0"))
 AI_IMAGE_MAX_SIZE = int(os.getenv("ORBIT_AI_IMAGE_MAX_SIZE", "0"))
 AI_IMAGE_JPEG_QUALITY = int(os.getenv("ORBIT_AI_IMAGE_JPEG_QUALITY", "80"))
 AI_COMPOSITE_VIEW = os.getenv("ORBIT_AI_COMPOSITE_VIEW", "0") != "0"
+SEGMENT_MAX_SIZE = int(os.getenv("ORBIT_SEGMENT_MAX_SIZE", "960"))
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m")
 SCALE_ROI = os.getenv("ORBIT_SCALE_ROI", "0.49,0.22,0.34,0.48")
 SCALE_DEPTH_DELTA_MM = float(os.getenv("ORBIT_SCALE_DEPTH_DELTA_MM", "35"))
 SCALE_AI_ROTATE = int(os.getenv("ORBIT_SCALE_AI_ROTATE", "180"))
@@ -61,16 +86,32 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 # ===========================================
 
 class IntelligentScanner:
-    def __init__(self, ollama_model=None, ollama_api_url=None, ollama_timeout=None, ollama_num_gpu=None, ollama_num_ctx=None, ollama_num_predict=None):
+    def __init__(
+        self,
+        ollama_model=None,
+        ollama_api_url=None,
+        ollama_timeout=None,
+        ollama_num_gpu=None,
+        ollama_num_ctx=None,
+        ollama_num_predict=None,
+        ai_provider=None,
+        ai_api_base=None,
+        ai_api_key=None,
+    ):
         print("⚡ 初始化: RealSense + Rembg + Open3D(RANSAC)...")
         self.ollama_model = ollama_model or OLLAMA_MODEL
         self.ollama_api_url = ollama_api_url or OLLAMA_API_URL
+        self.ai_provider = (ai_provider or AI_PROVIDER or "ollama").strip().lower()
+        self.ai_api_base = (ai_api_base or AI_API_BASE or "").strip()
+        self.ai_api_key = (ai_api_key or AI_API_KEY or "").strip()
         self.ollama_timeout = ollama_timeout or OLLAMA_TIMEOUT
         self.ollama_num_gpu = ollama_num_gpu if ollama_num_gpu is not None else OLLAMA_NUM_GPU
         self.ollama_num_ctx = ollama_num_ctx or OLLAMA_NUM_CTX
         self.ollama_num_predict = ollama_num_predict or OLLAMA_NUM_PREDICT
         self.ai_image_max_size = AI_IMAGE_MAX_SIZE
         self.ai_image_jpeg_quality = AI_IMAGE_JPEG_QUALITY
+        self.segment_max_size = SEGMENT_MAX_SIZE
+        self.ollama_keep_alive = OLLAMA_KEEP_ALIVE
         self.scale_roi = SCALE_ROI
         self.scale_depth_delta_mm = SCALE_DEPTH_DELTA_MM
         self.scale_ai_rotate = SCALE_AI_ROTATE
@@ -126,8 +167,10 @@ class IntelligentScanner:
         intr = profile.as_video_stream_profile().get_intrinsics()
         self.color_width = intr.width
         self.color_height = intr.height
-        self.pinhole_camera_intrinsic = o3d.camera.PinholeCameraIntrinsic(
-            intr.width, intr.height, intr.fx, intr.fy, intr.ppx, intr.ppy)
+        self.color_fx = intr.fx
+        self.color_fy = intr.fy
+        self.color_ppx = intr.ppx
+        self.color_ppy = intr.ppy
         self.color_sensor = self._find_color_sensor()
         self.last_exposure_roi = None
         self.exposure_roi_supported = EXPOSURE_ROI
@@ -152,6 +195,56 @@ class IntelligentScanner:
         quality = int(np.clip(self.ai_image_jpeg_quality, 60, 95))
         _, buffer = cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
         return base64.b64encode(buffer).decode('utf-8')
+
+    def _openai_chat_endpoint(self):
+        provider = (getattr(self, "ai_provider", "ollama") or "ollama").strip().lower()
+        base = (getattr(self, "ai_api_base", "") or "").strip().rstrip("/")
+        if not base:
+            if provider == "gemini":
+                base = "https://generativelanguage.googleapis.com/v1beta/openai"
+            else:
+                base = "https://api.openai.com/v1"
+        if base.endswith("/chat/completions"):
+            return base
+        return f"{base}/chat/completions"
+
+    def _openai_content_from_images(self, user_prompt, images):
+        content = [{"type": "text", "text": user_prompt}]
+        for image_b64 in images:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                }
+            )
+        return content
+
+    def _cloud_model_name(self):
+        model = str(self.ollama_model or "").strip()
+        provider = (getattr(self, "ai_provider", "ollama") or "ollama").strip().lower()
+        if provider == "gemini" and model.lower().startswith("models/"):
+            return model.split("/", 1)[1]
+        return model
+
+    @staticmethod
+    def _extract_json_text(ai_response):
+        if not ai_response:
+            return None
+        clean_json = str(ai_response).replace("```json", "").replace("```", "").strip()
+        try:
+            json.loads(clean_json)
+            return clean_json
+        except json.JSONDecodeError:
+            start = clean_json.find("{")
+            end = clean_json.rfind("}")
+            if start >= 0 and end > start:
+                candidate = clean_json[start : end + 1]
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError:
+                    return None
+        return None
 
     def _center_crop_image(self, image, ratio):
         ratio = float(np.clip(ratio, 0.25, 1.0))
@@ -179,6 +272,19 @@ class IntelligentScanner:
         if abs(scale - 1.0) < 0.01:
             return image
         return cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA)
+
+    def _resize_for_segmentation(self, image):
+        max_size = int(getattr(self, "segment_max_size", 0) or 0)
+        if max_size <= 0:
+            return image, 1.0, 1.0
+        h, w = image.shape[:2]
+        if max(h, w) <= max_size:
+            return image, 1.0, 1.0
+        scale = max_size / max(h, w)
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return resized, w / new_w, h / new_h
 
     def _detail_image_for_ai(self, image):
         if image is None:
@@ -392,6 +498,95 @@ class IntelligentScanner:
         color_frame = aligned_frames.get_color_frame()
         depth_frame = aligned_frames.get_depth_frame()
         return color_frame, depth_frame
+
+    def process_selection_frame(self, color_frame, depth_frame, mode, selection_bbox):
+        """Fast path for manual ROI confirmation.
+
+        Once the user has confirmed the target box, running semantic
+        segmentation again is wasted time. This path keeps the full image for
+        AI context, estimates scale from depth at the selected box, and lets
+        the caller crop the exact ROI later.
+        """
+        filtered_depth = self.spatial.process(depth_frame)
+        filtered_depth = self.temporal.process(filtered_depth)
+        depth_frame = filtered_depth.as_depth_frame()
+
+        full_color = np.asanyarray(color_frame.get_data())
+        full_depth = np.asanyarray(depth_frame.get_data())
+        h_img, w_img = full_color.shape[:2]
+        display_image = self._rotate_for_ai(full_color, mode)
+        display_h, display_w = display_image.shape[:2]
+
+        sensor_bbox = self._display_bbox_to_sensor_bbox(selection_bbox, mode)
+        pixels = self._normalized_bbox_to_pixels(sensor_bbox, w_img, h_img)
+        if not pixels:
+            self.last_measurement_meta = {
+                "measurement_reliable": False,
+                "measurement_source": "manual_bbox_fast_no_bbox",
+                "selection_view": "full_d435i",
+                "segmentation_skipped": True,
+            }
+            return display_image, None, None
+
+        x, y, w_box, h_box = pixels
+        obj_depth_crop = full_depth[y : y + h_box, x : x + w_box]
+        valid_depths = obj_depth_crop[obj_depth_crop > 0]
+        if len(valid_depths) == 0:
+            valid_depths = full_depth[full_depth > 0]
+
+        width_mm = None
+        height_mm = None
+        meta = {
+            "measurement_reliable": False,
+            "measurement_source": "manual_bbox_fast_depth",
+            "selection_bbox": {
+                "x": int(round(selection_bbox[0] * display_w)),
+                "y": int(round(selection_bbox[1] * display_h)),
+                "w": int(round(selection_bbox[2] * display_w)),
+                "h": int(round(selection_bbox[3] * display_h)),
+                "image_w": display_w,
+                "image_h": display_h,
+                "source": "manual_fast",
+            },
+            "manual_selection_bbox": {
+                "x": selection_bbox[0],
+                "y": selection_bbox[1],
+                "w": selection_bbox[2],
+                "h": selection_bbox[3],
+            },
+            "selection_view": "full_d435i",
+            "segmentation_skipped": True,
+        }
+
+        if len(valid_depths) > 0:
+            reference_depth = np.percentile(valid_depths, 20) * self.depth_scale
+            intrinsics = color_frame.profile.as_video_stream_profile().get_intrinsics()
+            p_tl = rs.rs2_deproject_pixel_to_point(intrinsics, [x, y], reference_depth)
+            p_br = rs.rs2_deproject_pixel_to_point(intrinsics, [x + w_box, y + h_box], reference_depth)
+            p_img_tl = rs.rs2_deproject_pixel_to_point(intrinsics, [0, 0], reference_depth)
+            p_img_br = rs.rs2_deproject_pixel_to_point(intrinsics, [w_img, h_img], reference_depth)
+
+            width_mm = abs(p_br[0] - p_tl[0]) * 1000
+            height_mm = abs(p_br[1] - p_tl[1]) * 1000
+            frame_w_mm = abs(p_img_br[0] - p_img_tl[0]) * 1000
+            frame_h_mm = abs(p_img_br[1] - p_img_tl[1]) * 1000
+            angle = (self.scale_ai_rotate if mode == "scale" else 0) % 360
+            if angle in (90, 270):
+                frame_w_mm, frame_h_mm = frame_h_mm, frame_w_mm
+            meta.update(
+                {
+                    "selection_frame_width_mm": frame_w_mm,
+                    "selection_frame_height_mm": frame_h_mm,
+                    "selection_reference_depth_m": reference_depth,
+                }
+            )
+
+        self.last_measurement_meta = meta
+        print(
+            "⏱️ 框选快路径: 跳过语义分割"
+            + (f", size={width_mm:.1f}x{height_mm:.1f}mm" if width_mm and height_mm else "")
+        )
+        return display_image, width_mm, height_mm
 
     def _release_realsense_for_aux(self):
         if not getattr(self, "pipeline_running", False):
@@ -633,7 +828,8 @@ class IntelligentScanner:
 
     def ask_ollama(self, image, width_mm, height_mm, weight_g=None, labels=None, locations=None, mode="auto", aux_image=None, context_image=None, selection_bbox=None):
         """使用标准的 Chat 接口发送请求"""
-        print(f"🚀 正在发送给 {self.ollama_model} (Chat Mode)...")
+        display_model = self._cloud_model_name() if (getattr(self, "ai_provider", "ollama") or "ollama").strip().lower() != "ollama" else self.ollama_model
+        print(f"🚀 正在发送给 {display_model} (Chat Mode)...")
 
         image_rule = "图像是俯视主视角，只识别裁图中央或秤盘上的小物品。"
         aux_context = "无"
@@ -655,6 +851,8 @@ class IntelligentScanner:
             image_rule = "第一张图是俯视主视角，第二张图只是侧面辅助视角；拍摄设备本身不是入库物品。"
         else:
             images = [self.image_to_base64(image)]
+        image_payload_mb = sum(len(item) * 3 / 4 for item in images) / (1024 * 1024)
+        print(f"⏱️ AI 图像载荷: {len(images)} 张, 约 {image_payload_mb:.2f} MB")
         label_context = json.dumps(labels[:40], ensure_ascii=False) if labels else "[]"
         location_context = json.dumps(locations[:40], ensure_ascii=False) if locations else "[]"
         weight_context = f"{weight_g:.1f}g" if weight_g is not None else "未读取"
@@ -672,20 +870,27 @@ class IntelligentScanner:
 识别策略:
 - 先判断框选区域或画面中央的主体，再用辅助视角补充确认同一件物品的外观。
 - name/category/manufacturer/model 只根据可见外观、清楚可读文字、标志、部件关系和传感器数据填写。
+- 输出语言必须以简体中文为主体：name、category、description、reasoning 必须使用简体中文；如果需要引用可见英文品牌、型号或标记，只能放在 manufacturer/model 或描述证据中作为原文引用。
+- name 应是中文通用物品名，不要直接使用英文商品短语；品牌、厂商、系列词只应写入 manufacturer/model 或描述证据，不要把品牌当作物品类别。
+- category 是表单里的主分类：优先从“可用 Homebox 标签”中选择最合适的一个，并且必须逐字复制；只有没有任何合适既有标签时，才输出一个简短的中文大类词。不要输出 "Electronics"、"Measuring Instruments" 等英文类别，不要自造细碎分类路径。
 - manufacturer 用来保存清楚可见的品牌、厂商或制造商，例如 "Guanglu"、"Canon"。
 - model 只用来保存清楚可见的真实型号、焦段、规格、量程、编号或关键标记，例如 "RF 28-70"、"0-150mm"、"CD-15AX"；如果只看见品牌而没有型号，则 model=null，不能把品牌写进 model。
 - 可读文字、logo、接口、按键、材质、形状、相互连接关系等多种证据应综合考虑；不要只凭单一轮廓猜具体型号或品类。
 - 判断品类时优先利用能说明功能的结构证据，例如可动部件、显示/读数区域、夹持/连接/调节机构和多视角一致性；文字、刻度、颜色和材质不能单独决定品类。
 - 证据不足时，使用更宽泛的名称和 category；完全无法确认时用 name="待确认物品", category="待确认", model=null。
 - 重量只能使用电子秤字段，不要从图片/OCR/秤屏读取重量。
-- 不要把辅助相机、电子秤、秤盘、托盘、桌面、背景杂物作为 name/category/model。
+- 电子秤重量字段只表示称重传感器读数，不是物品类别证据；不要因为输入里出现“电子秤重量”就把物品识别为电子秤。
+- 不要把辅助相机、电子秤、秤盘、托盘、桌面、背景杂物作为 name/category/model；也不要读取承载电子秤、秤屏或秤体上的品牌/文字来命名待入库物品。
+- 不要复用示例、历史识别结果或常见物品模板；只有框内目标物自身清晰可见的结构和文字同时支持时，才填写具体品类、品牌和型号。
 - 品牌、制造商、型号、焦段和编号只能来自清楚可读的文字；看不清就不要补全，禁止根据常见品牌或提示词补全。
-- tags 是 Homebox 的业务分类标签，按数组输出 1-4 个；优先直接复用已有标签。
+- tags 是 Homebox 的业务分类标签，按数组输出 1-4 个；优先直接复用已有标签，且 tags[0] 应尽量与 category 相同。
 - 如果已有标签适合，必须逐字复制已有标签，不要改写、翻译、增删字符；可以多选，但不要选择与物品明显无关的标签。
 - 标签应描述整件物品所属的大类，而不是内部零件、局部材质、显示屏、电池、接口或技术特征；例如带电子显示的工具仍应按工具类归类，不能只因为有电子部分就归为电子元件。
-- 如果确实没有合适的已有标签，才新建一个宽泛分类标签，并模仿已有风格使用“中文English”的短名称，例如“电子元件Electronics”；不要把品牌、型号、系列、具体品名、位置、尺寸或重量写进 tags。
-- suggested_location 优先从已有位置中选择；根据物品类型选择最合适的已有位置，只有能逐字复制一个已有位置名时才填写该字符串，否则写 null；不要新建、改写或猜测位置名。
+- 如果确实没有合适的已有标签，才新建一个宽泛分类标签；新标签必须以简体中文开头，可选附带英文后缀，例如“测量工具Measuring Tools”“电子设备Electronics”；不要输出纯英文标签，不要把品牌、型号、系列、具体品名、位置、尺寸或重量写进 tags。
+- suggested_location 是 Homebox 位置字段：只能从“已有位置”数组中选择一个字符串，并且必须逐字复制；如果没有合适位置或数组为空，必须写 null。
+- suggested_location 绝对不能新建、改写、翻译、拼接路径或猜测位置名；不要把 category、tags、英文类别、物品类型、桌面/电子秤/现场位置写成位置。
 - description 和 reasoning 必须简短，并说明最关键的可见证据。
+- description 和 reasoning 可以说明目标物“放在电子秤上”，但证据主体必须是目标物自身的结构、标识和部件；不要写成“根据电子秤外观判断”。
 可用 Homebox 标签(JSON数组，复用时必须逐字等于其中一个字符串): {label_context}
 已有位置(JSON数组，复用时必须逐字等于其中一个字符串): {location_context}
 字段: name, category, description, size, manufacturer, model, tags, suggested_location, reasoning。
@@ -694,24 +899,26 @@ class IntelligentScanner:
         system_prompt = (
             "你是 O.R.B.I.T. 入库识别器。必须只输出一个合法 JSON 对象，"
             "第一字符必须是 {，不要输出 Markdown、解释、思考过程或空内容。"
+            "除 manufacturer/model 中的品牌、型号、规格原文以及逐字复用的既有标签/位置外，"
+            "所有自然语言字段必须以简体中文为主体。"
         )
         json_schema = {
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
                 "category": {"type": "string"},
-                "description": {"type": "string", "maxLength": 80},
+                "description": {"type": "string", "maxLength": 60},
                 "size": {"type": ["string", "null"], "maxLength": 48},
                 "manufacturer": {"type": ["string", "null"], "maxLength": 64},
                 "model": {"type": ["string", "null"], "maxLength": 64},
                 "tags": {"type": "array", "items": {"type": "string", "maxLength": 40}, "minItems": 1, "maxItems": 4},
                 "suggested_location": {"type": ["string", "null"], "maxLength": 48},
-                "reasoning": {"type": "string", "maxLength": 120},
+                "reasoning": {"type": "string", "maxLength": 80},
             },
             "required": ["name", "category", "description", "size", "manufacturer", "model", "tags", "suggested_location", "reasoning"],
         }
 
-        def build_payload(user_prompt, num_predict):
+        def build_ollama_payload(user_prompt, num_predict):
             payload = {
                 "model": self.ollama_model,
                 "messages": [
@@ -724,6 +931,7 @@ class IntelligentScanner:
                 ],
                 "stream": False,
                 "format": json_schema,
+                "keep_alive": str(getattr(self, "ollama_keep_alive", OLLAMA_KEEP_ALIVE) or "15m"),
                 "options": {
                     "temperature": 0.0,
                     "num_ctx": self.ollama_num_ctx,
@@ -736,30 +944,152 @@ class IntelligentScanner:
                 payload["options"]["num_gpu"] = int(self.ollama_num_gpu)
             return payload
 
+        def build_openai_payload(user_prompt, num_predict, response_format="json_schema", include_reasoning=True):
+            payload = {
+                "model": self._cloud_model_name(),
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": self._openai_content_from_images(user_prompt, images)},
+                ],
+                "temperature": 0,
+                "max_tokens": int(num_predict),
+            }
+            provider_name = (getattr(self, "ai_provider", "ollama") or "ollama").strip().lower()
+            if provider_name == "gemini" and include_reasoning:
+                payload["reasoning_effort"] = "low"
+            if response_format == "json_schema":
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "orbit_item",
+                        "schema": json_schema,
+                        "strict": False,
+                    },
+                }
+            elif response_format == "json_object":
+                payload["response_format"] = {"type": "json_object"}
+            return payload
+
+        def cloud_response_format(provider_name, attempt_index):
+            if provider_name == "gemini":
+                return "json_object" if attempt_index == 0 else None
+            return "json_schema" if attempt_index == 0 else "json_object"
+
+        def extract_openai_content(result):
+            choices = result.get("choices") or []
+            if not choices:
+                return ""
+            message = choices[0].get("message") or {}
+            content = message.get("content") or ""
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text") or ""))
+                    else:
+                        parts.append(str(item))
+                return "\n".join(part for part in parts if part).strip()
+            return str(content).strip()
+
+        def openai_finish_reason(result):
+            choices = result.get("choices") or []
+            if not choices:
+                return ""
+            return str(choices[0].get("finish_reason") or "")
+
         try:
             num_predict = int(self.ollama_num_predict)
-            print(f"⏳ 等待 AI 响应 (单次结构化请求, num_predict={num_predict})...")
+            provider = (getattr(self, "ai_provider", "ollama") or "ollama").strip().lower()
+            print(f"⏳ 等待 AI 响应 ({provider}, num_predict={num_predict})...")
             start_t = time.time()
-            payload = build_payload(prompt, num_predict)
-            response = requests.post(self.ollama_api_url, json=payload, timeout=self.ollama_timeout)
-            print(f"⏱️ 网络耗时: {time.time() - start_t:.2f}s")
 
-            if response.status_code != 200:
-                print(f"❌ API 报错: {response.status_code}")
-                print(f"❌ 错误详情: {response.text}")
-                return None
+            if provider == "ollama":
+                payload = build_ollama_payload(prompt, num_predict)
+                response = requests.post(self.ollama_api_url, json=payload, timeout=self.ollama_timeout)
+                print(f"⏱️ 网络耗时: {time.time() - start_t:.2f}s")
 
-            result = response.json()
-            if "message" in result:
-                message = result.get("message") or {}
-                content = message.get("content") or ""
-                thinking = message.get("thinking") or ""
-            elif "response" in result:
-                content = result.get("response") or ""
-                thinking = result.get("thinking") or ""
+                if response.status_code != 200:
+                    print(f"❌ API 报错: {response.status_code}")
+                    print(f"❌ 错误详情: {response.text}")
+                    return None
+
+                result = response.json()
+                if "message" in result:
+                    message = result.get("message") or {}
+                    content = message.get("content") or ""
+                    thinking = message.get("thinking") or ""
+                elif "response" in result:
+                    content = result.get("response") or ""
+                    thinking = result.get("thinking") or ""
+                else:
+                    print(f"⚠️ 响应结构极其异常: {result}")
+                    return None
             else:
-                print(f"⚠️ 响应结构极其异常: {result}")
-                return None
+                api_key = (getattr(self, "ai_api_key", "") or "").strip()
+                if not api_key:
+                    print("❌ 云端 AI 未配置 API Key")
+                    return None
+                endpoint = self._openai_chat_endpoint()
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }
+                if CLOUD_MAX_TOKENS > 0:
+                    cloud_num_predict = CLOUD_MAX_TOKENS
+                elif provider == "gemini":
+                    cloud_num_predict = max(num_predict * 8, 8192)
+                else:
+                    cloud_num_predict = max(num_predict * 4, 2048)
+                content = ""
+                last_error_text = ""
+                retry_prompt = prompt
+                for attempt in range(2):
+                    attempt_num_predict = cloud_num_predict if attempt == 0 else max(cloud_num_predict, 12288 if provider == "gemini" else 4096)
+                    response_format = cloud_response_format(provider, attempt)
+                    active_response_format = response_format
+                    payload = build_openai_payload(retry_prompt, attempt_num_predict, response_format=active_response_format)
+                    response = requests.post(endpoint, headers=headers, json=payload, timeout=self.ollama_timeout)
+                    if response.status_code in {400, 422} and response_format:
+                        print(f"⚠️ 云端接口不接受 {response_format}，改用纯提示词 JSON 请求...")
+                        active_response_format = None
+                        payload = build_openai_payload(retry_prompt, attempt_num_predict, response_format=active_response_format)
+                        response = requests.post(endpoint, headers=headers, json=payload, timeout=self.ollama_timeout)
+                    if response.status_code in {400, 422} and provider == "gemini" and "reasoning_effort" in payload:
+                        print("⚠️ 云端接口不接受 reasoning_effort，移除后重试...")
+                        payload = build_openai_payload(retry_prompt, attempt_num_predict, response_format=active_response_format, include_reasoning=False)
+                        response = requests.post(endpoint, headers=headers, json=payload, timeout=self.ollama_timeout)
+
+                    if response.status_code != 200:
+                        last_error_text = response.text
+                        break
+
+                    result = response.json()
+                    content = extract_openai_content(result)
+                    finish_reason = openai_finish_reason(result)
+                    if finish_reason:
+                        print(f"⏱️ 云端 finish_reason: {finish_reason}")
+                    json_text = self._extract_json_text(content)
+                    if json_text:
+                        content = json_text
+                        break
+
+                    print(f"⚠️ 云端返回非 JSON，片段: {content[:160]}")
+                    retry_prompt = (
+                        "重新输出完整 JSON 对象，第一字符必须是 {，最后字符必须是 }。"
+                        "不要写 Here is、说明、Markdown、代码围栏或任何 JSON 外文本。"
+                        "字段必须只有: name, category, description, size, manufacturer, model, tags, suggested_location, reasoning。"
+                        "category 优先逐字复用可用 Homebox 标签；tags 优先逐字复用已有标签，没有合适标签时才按现有标签风格新建。"
+                        "suggested_location 只能逐字复制已有位置，没有匹配则 null。"
+                        f"可用 Homebox 标签: {label_context}。已有位置: {location_context}。"
+                    )
+                print(f"⏱️ 网络耗时: {time.time() - start_t:.2f}s")
+
+                if last_error_text:
+                    print(f"❌ API 报错: {response.status_code}")
+                    print(f"❌ 错误详情: {last_error_text}")
+                    return None
+
+                thinking = ""
 
             if content.strip():
                 return content
@@ -803,6 +1133,9 @@ class IntelligentScanner:
     def parse_ai_json(ai_response):
         if not ai_response:
             return None
+        extracted = IntelligentScanner._extract_json_text(ai_response)
+        if extracted:
+            return json.loads(extracted)
         clean_json = ai_response.replace("```json", "").replace("```", "").strip()
         try:
             return json.loads(clean_json)
@@ -819,7 +1152,7 @@ class IntelligentScanner:
         return None
 
     @staticmethod
-    def normalize_ai_data(data):
+    def normalize_ai_data(data, labels=None, locations=None):
         if not isinstance(data, dict):
             return data
 
@@ -862,10 +1195,35 @@ class IntelligentScanner:
             [str(tag).strip() for tag in tags if str(tag).strip()],
             normalized,
         )[:4]
+        if labels is not None:
+            allowed_labels = {
+                str(item.get("name") if isinstance(item, dict) else item).strip()
+                for item in (labels or [])
+                if str(item.get("name") if isinstance(item, dict) else item).strip()
+            }
+            exact_tags = [tag for tag in normalized["tags"] if tag in allowed_labels]
+            if exact_tags:
+                normalized["tags"] = exact_tags[:4]
+        if normalized["tags"]:
+            category = str(normalized.get("category") or "").strip()
+            tag_keys = {IntelligentScanner._tag_key(tag) for tag in normalized["tags"]}
+            category_key = IntelligentScanner._tag_key(category)
+            if not category or category_key not in tag_keys:
+                normalized["category"] = normalized["tags"][0]
 
         location = normalized.get("suggested_location")
         if isinstance(location, str) and re.search(r"电子秤|秤盘|托盘|桌面|玻璃|现场|当前位置|turntable|platter|table", location, re.I):
             normalized["suggested_location"] = None
+        elif locations is not None:
+            allowed_locations = {
+                str(item.get("name") if isinstance(item, dict) else item).strip()
+                for item in (locations or [])
+                if str(item.get("name") if isinstance(item, dict) else item).strip()
+            }
+            if str(location or "").strip() not in allowed_locations:
+                normalized["suggested_location"] = None
+            else:
+                normalized["suggested_location"] = str(location).strip()
 
         return normalized
 
@@ -926,10 +1284,17 @@ class IntelligentScanner:
         self._warm_camera()
 
         def capture_processed():
+            start_t = time.time()
             color_frame, depth_frame = self._wait_aligned_frame()
             if not color_frame or not depth_frame:
                 return None, None, None
-            return self.process_frame(color_frame, depth_frame, mode=mode)
+            if selection_bbox:
+                result = self.process_selection_frame(color_frame, depth_frame, mode, selection_bbox)
+                print(f"⏱️ 框选拍摄处理耗时: {time.time() - start_t:.2f}s")
+                return result
+            result = self.process_frame(color_frame, depth_frame, mode=mode)
+            print(f"⏱️ 拍摄分割处理耗时: {time.time() - start_t:.2f}s")
+            return result
 
         self.last_measurement_meta = {}
         crop_img, width, height = capture_processed()
@@ -1025,7 +1390,7 @@ class IntelligentScanner:
         if not data:
             return None, crop_img, measurement
 
-        data = self.normalize_ai_data(data)
+        data = self.normalize_ai_data(data, labels=labels, locations=locations)
         print(json.dumps(data, indent=4, ensure_ascii=False))
         return data, crop_img, measurement
 
@@ -1179,23 +1544,32 @@ class IntelligentScanner:
     def get_visual_foreground_bbox(self, image, prefer_center=True):
         """Use the existing rembg foreground mask to suggest a subject bbox."""
         try:
-            color_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            no_bg_image = remove(color_rgb)
+            original_h, original_w = image.shape[:2]
+            work_image, scale_x, scale_y = self._resize_for_segmentation(image)
+            color_rgb = cv2.cvtColor(work_image, cv2.COLOR_BGR2RGB)
+            start_t = time.time()
+            no_bg_image = _remove_background(color_rgb)
+            if work_image.shape[:2] != image.shape[:2]:
+                print(
+                    "⏱️ rembg 前景分割: "
+                    f"{work_image.shape[1]}x{work_image.shape[0]} -> {time.time() - start_t:.2f}s"
+                )
             alpha_channel = no_bg_image[:, :, 3]
             _, mask = cv2.threshold(alpha_channel, 10, 255, cv2.THRESH_BINARY)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            min_area = max(500, image.shape[0] * image.shape[1] * 0.0015)
+            min_area = max(120, work_image.shape[0] * work_image.shape[1] * 0.0015)
             contours = [cnt for cnt in contours if cv2.contourArea(cnt) >= min_area]
             if not contours:
-                return None, mask
+                full_mask = cv2.resize(mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+                return None, full_mask
 
             cnt = None
             if prefer_center:
-                center_x = image.shape[1] // 2
-                center_y = image.shape[0] // 2
+                center_x = work_image.shape[1] // 2
+                center_y = work_image.shape[0] // 2
                 cnt, _bbox = self.select_central_object(mask, center_x, center_y)
                 if cnt is not None and cv2.contourArea(cnt) < min_area:
                     cnt = None
@@ -1204,7 +1578,13 @@ class IntelligentScanner:
 
             clean_mask = np.zeros_like(mask)
             cv2.drawContours(clean_mask, [cnt], -1, 255, thickness=cv2.FILLED)
-            return cv2.boundingRect(cnt), clean_mask
+            x, y, w_box, h_box = cv2.boundingRect(cnt)
+            bx = max(0, min(int(round(x * scale_x)), original_w - 1))
+            by = max(0, min(int(round(y * scale_y)), original_h - 1))
+            bw = max(1, min(int(round(w_box * scale_x)), original_w - bx))
+            bh = max(1, min(int(round(h_box * scale_y)), original_h - by))
+            full_mask = cv2.resize(clean_mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+            return (bx, by, bw, bh), full_mask
         except Exception as exc:
             print(f"⚠️ 视觉前景分割失败: {exc}")
             return None, None
@@ -1221,6 +1601,7 @@ class IntelligentScanner:
         """
         【家具模式 v3.0】RANSAC 地面剔除 + DBSCAN 聚类 + 3D中心锁定
         """
+        o3d = _open3d()
         h_full, w_full = depth_image.shape
 
         # 1. 降采样 (480x270)
@@ -1232,10 +1613,10 @@ class IntelligentScanner:
 
         small_intr = o3d.camera.PinholeCameraIntrinsic(
             target_w, target_h,
-            self.pinhole_camera_intrinsic.intrinsic_matrix[0,0] * ratio_x,
-            self.pinhole_camera_intrinsic.intrinsic_matrix[1,1] * ratio_y,
-            self.pinhole_camera_intrinsic.intrinsic_matrix[0,2] * ratio_x,
-            self.pinhole_camera_intrinsic.intrinsic_matrix[1,2] * ratio_y
+            self.color_fx * ratio_x,
+            self.color_fy * ratio_y,
+            self.color_ppx * ratio_x,
+            self.color_ppy * ratio_y
         )
 
         o3d_depth = o3d.geometry.Image(small_depth)

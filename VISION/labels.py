@@ -40,14 +40,22 @@ def font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
-def item_code(item: dict) -> str:
-    raw = item.get("assetId") or item.get("asset_id") or item.get("code") or item.get("id") or "ORBIT"
-    text = str(raw).strip()
+def canonical_asset_code(value) -> str:
+    text = str(value or "").strip().upper()
     if not text:
-        text = "ORBIT"
-    if not text.upper().startswith("ORB"):
-        text = f"ORB-{text}"
-    return text[:32]
+        return ""
+    if text.startswith("ORB-"):
+        text = text[4:]
+    elif text.startswith("ORB"):
+        text = text[3:]
+    digits = re.sub(r"\D", "", text)
+    if len(digits) >= 10:
+        return digits[:10]
+    return ""
+
+
+def item_code(item: dict) -> str:
+    return display_code(item)
 
 
 def environment_value(name: str) -> str:
@@ -96,26 +104,17 @@ def owner_home_url() -> str:
 
 
 def display_code(item: dict) -> str:
-    return rfid_epc_code(item)
+    return f"ORB-{rfid_epc_code(item)}"
 
 
 def rfid_epc_code(item: dict) -> str:
-    raw = str(item.get("assetId") or item.get("asset_id") or item.get("code") or item.get("id") or "").strip()
-    readable = item_code(item).upper()
-    if re.fullmatch(r"[A-Z0-9-]+", readable):
-        if 8 <= len(readable) <= 12 and len(readable) % 2 == 0:
-            return readable
-        if readable.startswith("ORB-"):
-            compact = "ORB-" + re.sub(r"[^A-Z0-9]", "", readable[4:])
-            if 8 <= len(compact) <= 12 and len(compact) % 2 == 0:
-                return compact
-    clean = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
-    if len(clean) >= 8:
-        suffix = clean[:8]
-    else:
-        source = raw or str(item.get("name") or "ORBIT")
-        suffix = hashlib.blake2s(source.encode("utf-8"), digest_size=4).hexdigest().upper()
-    return f"ORB-{suffix}"[:12]
+    for key in ("assetId", "asset_id", "rfid_code", "epc_code", "code"):
+        code = canonical_asset_code(item.get(key))
+        if code:
+            return code
+    source = str(item.get("id") or item.get("name") or "ORBIT")
+    value = int.from_bytes(hashlib.blake2s(source.encode("utf-8"), digest_size=4).digest(), "big")
+    return f"000000{value % 10000:04d}"
 
 
 def rfid_epc_hex(item: dict) -> str:
@@ -225,6 +224,11 @@ def item_location_name(item: dict, ai: dict) -> str:
     location = item.get("location")
     if isinstance(location, dict):
         return str(location.get("name") or "")
+    parent = item.get("parent")
+    if isinstance(parent, dict):
+        return str(parent.get("name") or "")
+    if item.get("parentName"):
+        return str(item["parentName"])
     return ""
 
 
@@ -407,7 +411,8 @@ def print_item_label_set(
     dry_run: bool = False,
 ) -> dict:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    code = rfid_epc_code(item)
+    epc_code = rfid_epc_code(item)
+    visible_code = display_code(item)
     human = human_label_image(item, ai=ai, measurement=measurement)
     coded = code_label_image(
         item,
@@ -415,13 +420,14 @@ def print_item_label_set(
         ai=ai,
         owner_placeholder="[Owner Tel]" if dry_run else "",
     )
-    human_preview = save_preview(human, f"label_human_{code}_{stamp}.png")
-    code_preview = save_preview(coded, f"label_code_{code}_{stamp}.png")
+    human_preview = save_preview(human, f"label_human_{epc_code}_{stamp}.png")
+    code_preview = save_preview(coded, f"label_code_{epc_code}_{stamp}.png")
     if not dry_run:
         print_label_image(human, printer_name, "O.R.B.I.T. human label")
         print_label_image(coded, printer_name, "O.R.B.I.T. AR QR label")
     return {
-        "code": code,
+        "code": visible_code,
+        "epc_code": epc_code,
         "human_preview": str(human_preview),
         "code_preview": str(code_preview),
         "printed": not dry_run,
@@ -432,7 +438,8 @@ def print_item_label_set(
 def rfid_payload(item: dict, homebox_url: str) -> dict:
     epc_code = rfid_epc_code(item)
     return {
-        "code": epc_code,
+        "code": display_code(item),
+        "display_code": display_code(item),
         "epc_code": epc_code,
         "epc_hex_candidate": rfid_epc_hex(item),
         "url": item_url(homebox_url, item),

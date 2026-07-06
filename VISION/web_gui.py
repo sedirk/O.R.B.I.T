@@ -17,7 +17,7 @@ import requests
 import cv2
 
 from homebox import HomeboxClient, HomeboxError
-from labels import display_code, item_url, print_item_label_set, rfid_epc_code, rfid_epc_hex, rfid_payload
+from labels import canonical_asset_code, display_code, item_url, print_item_label_set, rfid_epc_code, rfid_epc_hex, rfid_payload
 from rfid_e710 import E710Error, E710Reader
 from scale import ElectronicScaleReader
 
@@ -40,6 +40,41 @@ DEFAULT_PORT = int(os.getenv("ORBIT_WEB_PORT", "8765"))
 DEFAULT_HOMEBOX_URL = os.getenv("HOMEBOX_URL", "http://192.168.31.3:3100")
 DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/chat")
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
+DEFAULT_AI_TARGET = os.getenv("ORBIT_AI_TARGET", "local")
+DEFAULT_CLOUD_PROVIDER = os.getenv("ORBIT_CLOUD_PROVIDER", "openai")
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+LOCAL_CONFIG_PATH = Path(os.getenv("ORBIT_CONFIG_FILE", str(ROOT / "orbit_runtime.local.json")))
+
+
+def load_local_runtime_config() -> dict:
+    try:
+        if not LOCAL_CONFIG_PATH.exists():
+            return {}
+        data = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+        if isinstance(data, dict) and isinstance(data.get("config"), dict):
+            return dict(data["config"])
+        if isinstance(data, dict):
+            return dict(data)
+    except Exception as exc:
+        print(f"⚠️ 本地配置读取失败: {exc}")
+    return {}
+
+
+LOCAL_RUNTIME_CONFIG = load_local_runtime_config()
+
+
+def config_default(key: str, env_names, fallback=""):
+    if isinstance(env_names, str):
+        env_names = [env_names]
+    for name in env_names:
+        value = os.getenv(name)
+        if value not in {None, ""}:
+            return value
+    value = LOCAL_RUNTIME_CONFIG.get(key)
+    if value not in {None, ""}:
+        return str(value)
+    return fallback
 
 
 def now_ms() -> int:
@@ -104,6 +139,24 @@ def normalize_ollama_chat_url(value: str | None) -> str:
     return f"{normalize_ollama_base_url(value)}/api/chat"
 
 
+def infer_ai_target_from_ollama_url(value: str | None) -> str:
+    base = normalize_ollama_base_url(value)
+    return "local" if base in {"http://127.0.0.1:11434", "http://localhost:11434"} else "lan"
+
+
+def default_cloud_base(provider: str | None) -> str:
+    return DEFAULT_GEMINI_OPENAI_BASE_URL if str(provider or "").strip().lower() == "gemini" else DEFAULT_OPENAI_BASE_URL
+
+
+def normalize_openai_base_url(value: str | None, provider: str | None = None) -> str:
+    text = str(value or "").strip() or default_cloud_base(provider)
+    if not re.match(r"^https?://", text, re.I):
+        text = f"https://{text}"
+    text = text.rstrip("/")
+    text = re.sub(r"/chat/completions$", "", text, flags=re.I)
+    return text.rstrip("/")
+
+
 def config_bool(value, default: str = "0") -> str:
     if value is None:
         return default
@@ -119,28 +172,35 @@ def config_bool(value, default: str = "0") -> str:
 
 CONFIG_LOCK = threading.Lock()
 RUNTIME_CONFIG = {
-    "homebox_url": DEFAULT_HOMEBOX_URL.rstrip("/"),
-    "homebox_token": os.getenv("HOMEBOX_TOKEN", ""),
-    "homebox_username": os.getenv("HOMEBOX_USERNAME", ""),
-    "homebox_password": os.getenv("HOMEBOX_PASSWORD", ""),
-    "ollama_url": normalize_ollama_chat_url(DEFAULT_OLLAMA_URL),
-    "ollama_model": DEFAULT_MODEL,
-    "mode": os.getenv("ORBIT_SCAN_MODE", "auto"),
-    "num_predict": os.getenv("OLLAMA_NUM_PREDICT", "192"),
-    "image_max_size": os.getenv("ORBIT_AI_IMAGE_MAX_SIZE", "0"),
-    "scale_port": os.getenv("SCALE_PORT", "COM9"),
-    "scale_baud": os.getenv("SCALE_BAUD", "9600"),
-    "rfid_port": os.getenv("RFID_PORT", ""),
-    "aux_camera_enabled": os.getenv("ORBIT_AUX_CAMERA_ENABLED", "1"),
-    "aux_camera_index": os.getenv("ORBIT_AUX_CAMERA_INDEX", "0"),
-    "aux_camera_backend": os.getenv("ORBIT_AUX_CAMERA_BACKEND", "dshow"),
-    "aux_camera_width": os.getenv("ORBIT_AUX_CAMERA_WIDTH", "1280"),
-    "aux_camera_height": os.getenv("ORBIT_AUX_CAMERA_HEIGHT", "720"),
-    "aux_camera_center_crop": os.getenv("ORBIT_AUX_CAMERA_CENTER_CROP", "1"),
-    "aux_camera_auto_exposure": os.getenv("ORBIT_AUX_CAMERA_AUTO_EXPOSURE", "1"),
-    "aux_camera_warmup_seconds": os.getenv("ORBIT_AUX_CAMERA_WARMUP_SECONDS", "1.2"),
-    "print_pet_labels": os.getenv("ORBIT_PRINT_LABELS", "1"),
-    "write_rfid_tags": os.getenv("ORBIT_WRITE_RFID", "1"),
+    "homebox_url": config_default("homebox_url", "HOMEBOX_URL", DEFAULT_HOMEBOX_URL).rstrip("/"),
+    "homebox_token": config_default("homebox_token", "HOMEBOX_TOKEN", ""),
+    "homebox_username": config_default("homebox_username", "HOMEBOX_USERNAME", ""),
+    "homebox_password": config_default("homebox_password", "HOMEBOX_PASSWORD", ""),
+    "ollama_url": normalize_ollama_chat_url(config_default("ollama_url", "OLLAMA_API_URL", DEFAULT_OLLAMA_URL)),
+    "ollama_model": config_default("ollama_model", "OLLAMA_MODEL", DEFAULT_MODEL),
+    "ai_target": config_default("ai_target", "ORBIT_AI_TARGET", infer_ai_target_from_ollama_url(config_default("ollama_url", "OLLAMA_API_URL", DEFAULT_OLLAMA_URL))),
+    "cloud_provider": config_default("cloud_provider", "ORBIT_CLOUD_PROVIDER", DEFAULT_CLOUD_PROVIDER),
+    "ai_api_base": normalize_openai_base_url(
+        config_default("ai_api_base", "ORBIT_AI_API_BASE", ""),
+        config_default("cloud_provider", "ORBIT_CLOUD_PROVIDER", DEFAULT_CLOUD_PROVIDER),
+    ),
+    "ai_api_key": config_default("ai_api_key", ["ORBIT_AI_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"], ""),
+    "mode": config_default("mode", "ORBIT_SCAN_MODE", "auto"),
+    "num_predict": config_default("num_predict", "OLLAMA_NUM_PREDICT", "192"),
+    "image_max_size": config_default("image_max_size", "ORBIT_AI_IMAGE_MAX_SIZE", "0"),
+    "scale_port": config_default("scale_port", "SCALE_PORT", "COM9"),
+    "scale_baud": config_default("scale_baud", "SCALE_BAUD", "9600"),
+    "rfid_port": config_default("rfid_port", "RFID_PORT", ""),
+    "aux_camera_enabled": config_default("aux_camera_enabled", "ORBIT_AUX_CAMERA_ENABLED", "1"),
+    "aux_camera_index": config_default("aux_camera_index", "ORBIT_AUX_CAMERA_INDEX", "0"),
+    "aux_camera_backend": config_default("aux_camera_backend", "ORBIT_AUX_CAMERA_BACKEND", "dshow"),
+    "aux_camera_width": config_default("aux_camera_width", "ORBIT_AUX_CAMERA_WIDTH", "1280"),
+    "aux_camera_height": config_default("aux_camera_height", "ORBIT_AUX_CAMERA_HEIGHT", "720"),
+    "aux_camera_center_crop": config_default("aux_camera_center_crop", "ORBIT_AUX_CAMERA_CENTER_CROP", "1"),
+    "aux_camera_auto_exposure": config_default("aux_camera_auto_exposure", "ORBIT_AUX_CAMERA_AUTO_EXPOSURE", "1"),
+    "aux_camera_warmup_seconds": config_default("aux_camera_warmup_seconds", "ORBIT_AUX_CAMERA_WARMUP_SECONDS", "1.2"),
+    "print_pet_labels": config_default("print_pet_labels", "ORBIT_PRINT_LABELS", "1"),
+    "write_rfid_tags": config_default("write_rfid_tags", "ORBIT_WRITE_RFID", "1"),
 }
 
 
@@ -158,6 +218,10 @@ def public_config(config: dict | None = None) -> dict:
         "homebox_has_password": bool(config.get("homebox_password")),
         "ollama_url": config.get("ollama_url", DEFAULT_OLLAMA_URL),
         "ollama_model": config.get("ollama_model", DEFAULT_MODEL),
+        "ai_target": config.get("ai_target", infer_ai_target_from_ollama_url(config.get("ollama_url", DEFAULT_OLLAMA_URL))),
+        "cloud_provider": config.get("cloud_provider", DEFAULT_CLOUD_PROVIDER),
+        "ai_api_base": config.get("ai_api_base", default_cloud_base(config.get("cloud_provider"))),
+        "ai_has_api_key": bool(config.get("ai_api_key")),
         "mode": config.get("mode", "auto"),
         "num_predict": config.get("num_predict", "192"),
         "image_max_size": config.get("image_max_size", "0"),
@@ -177,6 +241,22 @@ def public_config(config: dict | None = None) -> dict:
     }
 
 
+def save_local_runtime_config(config: dict) -> None:
+    try:
+        LOCAL_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": "orbit.runtime_config",
+            "version": 1,
+            "updated_at": now_ms(),
+            "config": {key: config.get(key, "") for key in RUNTIME_CONFIG.keys()},
+        }
+        tmp_path = LOCAL_CONFIG_PATH.with_name(f"{LOCAL_CONFIG_PATH.name}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, LOCAL_CONFIG_PATH)
+    except Exception as exc:
+        print(f"⚠️ 本地配置保存失败: {exc}")
+
+
 def runtime_homebox_client(timeout: int = 20) -> HomeboxClient:
     config = config_snapshot()
     return HomeboxClient(
@@ -186,6 +266,38 @@ def runtime_homebox_client(timeout: int = 20) -> HomeboxClient:
         password=config.get("homebox_password") or os.getenv("HOMEBOX_PASSWORD"),
         timeout=timeout,
     )
+
+
+def list_openai_compatible_models(provider: str, base_url: str, api_key: str, timeout: int = 5) -> dict:
+    provider = (provider or "openai").strip().lower()
+    base = normalize_openai_base_url(base_url, provider)
+    result = {"ok": False, "provider": provider, "base_url": base, "models": [], "ps": "", "message": ""}
+    if not api_key:
+        result["message"] = "未配置云端 API Key"
+        return result
+    try:
+        response = requests.get(
+            f"{base}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        rows = data.get("data") or data.get("models") or []
+        models = []
+        for row in rows:
+            if isinstance(row, dict):
+                name = row.get("id") or row.get("name")
+            else:
+                name = str(row)
+            if name:
+                models.append(str(name))
+        result["models"] = sorted(set(models), key=str.lower)
+        result["ok"] = True
+        result["ps"] = "云端模型列表已读取"
+    except Exception as exc:
+        result["message"] = f"读取云端模型列表失败: {exc}"
+    return result
 
 
 def update_runtime_config(payload: dict) -> tuple[dict, bool]:
@@ -213,6 +325,23 @@ def update_runtime_config(payload: dict) -> tuple[dict, bool]:
     homebox_token = str(payload.get("homebox_token") or "").strip()
     if homebox_token:
         updates["homebox_token"] = homebox_token
+
+    ai_target = str(payload.get("ai_target") or "").strip().lower()
+    if ai_target in {"local", "lan", "cloud"}:
+        updates["ai_target"] = ai_target
+
+    cloud_provider = str(payload.get("cloud_provider") or payload.get("ai_provider") or "").strip().lower()
+    if cloud_provider in {"openai", "gemini"}:
+        updates["cloud_provider"] = cloud_provider
+
+    active_cloud_provider = updates.get("cloud_provider") or previous.get("cloud_provider") or DEFAULT_CLOUD_PROVIDER
+    ai_api_base = str(payload.get("ai_api_base") or "").strip()
+    if ai_api_base:
+        updates["ai_api_base"] = normalize_openai_base_url(ai_api_base, active_cloud_provider)
+
+    ai_api_key = str(payload.get("ai_api_key") or "").strip()
+    if ai_api_key:
+        updates["ai_api_key"] = ai_api_key
 
     ollama_url = str(payload.get("ollama_url") or "").strip()
     if ollama_url:
@@ -281,6 +410,12 @@ def update_runtime_config(payload: dict) -> tuple[dict, bool]:
         os.environ["HOMEBOX_USERNAME"] = current["homebox_username"]
     if current.get("homebox_password"):
         os.environ["HOMEBOX_PASSWORD"] = current["homebox_password"]
+    os.environ["ORBIT_AI_TARGET"] = current["ai_target"]
+    os.environ["ORBIT_CLOUD_PROVIDER"] = current["cloud_provider"]
+    os.environ["ORBIT_AI_PROVIDER"] = "ollama" if current["ai_target"] in {"local", "lan"} else current["cloud_provider"]
+    os.environ["ORBIT_AI_API_BASE"] = current["ai_api_base"]
+    if current.get("ai_api_key"):
+        os.environ["ORBIT_AI_API_KEY"] = current["ai_api_key"]
     os.environ["OLLAMA_API_URL"] = current["ollama_url"]
     os.environ["OLLAMA_MODEL"] = current["ollama_model"]
     os.environ["ORBIT_SCAN_MODE"] = current["mode"]
@@ -299,6 +434,7 @@ def update_runtime_config(payload: dict) -> tuple[dict, bool]:
     os.environ["ORBIT_AUX_CAMERA_WARMUP_SECONDS"] = current["aux_camera_warmup_seconds"]
     os.environ["ORBIT_PRINT_LABELS"] = current["print_pet_labels"]
     os.environ["ORBIT_WRITE_RFID"] = current["write_rfid_tags"]
+    save_local_runtime_config(current)
 
     scale_changed = (
         previous.get("scale_port") != current.get("scale_port")
@@ -319,14 +455,22 @@ def base_env() -> dict:
         env["HOMEBOX_USERNAME"] = config["homebox_username"]
     if config.get("homebox_password"):
         env["HOMEBOX_PASSWORD"] = config["homebox_password"]
+    env["ORBIT_AI_TARGET"] = config["ai_target"]
+    env["ORBIT_CLOUD_PROVIDER"] = config["cloud_provider"]
+    env["ORBIT_AI_PROVIDER"] = "ollama" if config["ai_target"] in {"local", "lan"} else config["cloud_provider"]
+    env["ORBIT_AI_API_BASE"] = config["ai_api_base"]
+    if config.get("ai_api_key"):
+        env["ORBIT_AI_API_KEY"] = config["ai_api_key"]
     env["OLLAMA_API_URL"] = config["ollama_url"]
     env["OLLAMA_MODEL"] = config["ollama_model"]
     env.setdefault("OLLAMA_NUM_GPU", "36")
     env.setdefault("OLLAMA_NUM_CTX", "2048")
     env["OLLAMA_NUM_PREDICT"] = config["num_predict"]
     env.setdefault("OLLAMA_TIMEOUT", "150")
+    env.setdefault("OLLAMA_KEEP_ALIVE", "15m")
     env["ORBIT_SCAN_MODE"] = config["mode"]
     env.setdefault("ORBIT_SCALE_AI_ROTATE", "180")
+    env.setdefault("ORBIT_SEGMENT_MAX_SIZE", "960")
     env.setdefault("ORBIT_EXPOSURE_RETRY", "1")
     env.setdefault("ORBIT_AI_ENHANCE", "1")
     env.setdefault("ORBIT_AI_COMPOSITE_VIEW", "0")
@@ -344,6 +488,7 @@ def base_env() -> dict:
     env["ORBIT_AUX_CAMERA_CENTER_CROP"] = config["aux_camera_center_crop"]
     env["ORBIT_AUX_CAMERA_AUTO_EXPOSURE"] = config["aux_camera_auto_exposure"]
     env["ORBIT_AUX_CAMERA_WARMUP_SECONDS"] = config["aux_camera_warmup_seconds"]
+    env.setdefault("ORBIT_AUX_RECAPTURE_ON_SELECTION", "0")
     env["ORBIT_PRINT_LABELS"] = config["print_pet_labels"]
     env["ORBIT_WRITE_RFID"] = config["write_rfid_tags"]
     return env
@@ -581,6 +726,10 @@ class TaskRunner:
         num_predict = str(payload.get("num_predict") or config.get("num_predict") or "192")
         homebox_url = str(payload.get("homebox_url") or config.get("homebox_url") or DEFAULT_HOMEBOX_URL).rstrip("/")
         ollama_url = normalize_ollama_chat_url(payload.get("ollama_url") or config.get("ollama_url") or DEFAULT_OLLAMA_URL)
+        ai_target = str(payload.get("ai_target") or config.get("ai_target") or DEFAULT_AI_TARGET).strip().lower()
+        cloud_provider = str(payload.get("cloud_provider") or config.get("cloud_provider") or DEFAULT_CLOUD_PROVIDER).strip().lower()
+        ai_provider = "ollama" if ai_target in {"local", "lan"} else cloud_provider
+        ai_api_base = normalize_openai_base_url(payload.get("ai_api_base") or config.get("ai_api_base"), cloud_provider)
         image_max_size = str(
             payload.get("image_max_size")
             if payload.get("image_max_size") is not None
@@ -595,6 +744,10 @@ class TaskRunner:
             ollama_url,
             "--ollama-model",
             model,
+            "--ai-provider",
+            ai_provider,
+            "--ai-api-base",
+            ai_api_base,
             "--ollama-num-gpu",
             os.getenv("OLLAMA_NUM_GPU", "36"),
             "--ollama-num-ctx",
@@ -895,6 +1048,7 @@ class TaskRunner:
                 "category": ai.get("category") or "",
                 "manufacturer": ai.get("manufacturer") or "",
                 "model": ai.get("model") or "",
+                "asset_code": canonical_asset_code(ai.get("assetId") or ai.get("asset_id") or ai.get("code")),
                 "quantity": ai.get("quantity") or 1,
                 "tags": ", ".join([str(t) for t in (ai.get("tags") or [])]),
                 "suggested_location": ai.get("suggested_location") or "",
@@ -936,6 +1090,15 @@ class TaskRunner:
         ai = pending.get("ai") or {}
         editable = pending.get("editable") or {}
         fields = {**editable, **(edited or {})}
+        asset_code_input = str(
+            fields.get("asset_code")
+            or fields.get("assetId")
+            or fields.get("asset_id")
+            or ""
+        ).strip()
+        asset_code = canonical_asset_code(asset_code_input)
+        if asset_code_input and not asset_code:
+            return False, "资产编号需为 10 位数字，例如 2607060001；可粘贴 ORB-2607060001，保存时会自动去掉 ORB-。", None
         tags = fields.get("tags") or []
         if isinstance(tags, str):
             tags = [tag.strip() for tag in re.split(r"[,，、/;；\n]+", tags) if tag.strip()]
@@ -955,6 +1118,9 @@ class TaskRunner:
                 "size": str(fields.get("size") or "").strip() or None,
             }
         )
+        if asset_code:
+            ai["assetId"] = asset_code
+            fields["asset_code"] = asset_code
 
         measurement = pending.get("measurement") or {}
         for key in ("width_mm", "height_mm", "weight_g"):
@@ -1008,6 +1174,12 @@ class TaskRunner:
             return False, f"入库失败: {exc}", None
 
         stored_item = item if isinstance(item, dict) else {"id": str(item), "name": ai.get("name")}
+        stored_code = canonical_asset_code(stored_item.get("assetId") or stored_item.get("asset_id") or asset_code)
+        if stored_code:
+            stored_item["assetId"] = stored_code
+            stored_item["asset_id"] = stored_code
+            ai["assetId"] = stored_code
+            fields["asset_code"] = stored_code
         with self.lock:
             if self.pending_item and self.pending_item.get("id") == pending.get("id"):
                 self.pending_item["ai"] = ai
@@ -1019,7 +1191,47 @@ class TaskRunner:
                 self.task.setdefault("logs", []).append(f"Homebox item committed: {stored_item.get('id')}")
         record_ok, record_message, _record_meta = self.save_intake_record_for_pending("homebox_commit")
         return True, f"入库完成，可继续写标签；{record_message}", stored_item
-        return True, "入库完成，可继续写标签", stored_item
+
+    def _ensure_item_asset_id(
+        self,
+        item: dict,
+        *,
+        asset_code: str | None = None,
+        sync_homebox: bool = False,
+        pending_id: str | None = None,
+    ) -> dict:
+        item = dict(item or {})
+        code = canonical_asset_code(asset_code) if asset_code else ""
+        if not code:
+            code = rfid_epc_code(item)
+        current = str(item.get("assetId") or item.get("asset_id") or "").strip()
+        if canonical_asset_code(current) == code:
+            return item
+
+        item["assetId"] = code
+        item["asset_id"] = code
+
+        if sync_homebox:
+            item_id = str(item.get("id") or "").strip()
+            if item_id and item_id != "dry-run":
+                try:
+                    client = runtime_homebox_client(timeout=12)
+                    if client.authenticated:
+                        updated = client.set_item_asset_id(item_id, code)
+                        if isinstance(updated, dict):
+                            updated.setdefault("assetId", code)
+                            updated.setdefault("asset_id", code)
+                            item.update(updated)
+                except Exception as exc:
+                    with self.lock:
+                        if self.task:
+                            self.task.setdefault("logs", []).append(f"Homebox asset ID sync failed: {exc}")
+
+        if pending_id:
+            with self.lock:
+                if self.pending_item and self.pending_item.get("id") == pending_id:
+                    self.pending_item["committed_item"] = item
+        return item
 
     def write_labels_for_pending(self, options: dict | None = None):
         with self.lock:
@@ -1033,16 +1245,25 @@ class TaskRunner:
         ai = pending.get("ai") or {}
         measurement = pending.get("measurement") or {}
         config = config_snapshot()
+        item = self._ensure_item_asset_id(
+            item,
+            asset_code=(pending.get("editable") or {}).get("asset_code"),
+            sync_homebox=True,
+            pending_id=pending.get("id"),
+        )
         label_result = None
         rfid_result = None
         errors = []
         options = options or {}
-        rfid_enabled = config_bool(config.get("write_rfid_tags"), "1") == "1"
+        pet_enabled = config_bool(options.get("print_pet_labels"), config.get("print_pet_labels", "1")) == "1"
+        rfid_enabled = config_bool(options.get("write_rfid_tags"), config.get("write_rfid_tags", "1")) == "1"
         rfid_target_epc = str(options.get("rfid_target_epc") or "").strip()
+        if not pet_enabled and not rfid_enabled:
+            return False, "请至少选择 PET 标签或 RFID 标签", None
         if rfid_enabled and not rfid_target_epc:
             return False, "缺少 RFID 目标标签，请先盘点并确认要写入的标签", None
 
-        if config_bool(config.get("print_pet_labels"), "1") == "1":
+        if pet_enabled:
             try:
                 label_result = print_item_label_set(
                     item,
@@ -1105,6 +1326,7 @@ class TaskRunner:
         ai = pending.get("ai") or {}
         measurement = pending.get("measurement") or {}
         config = config_snapshot()
+        item = self._ensure_item_asset_id(item, asset_code=(pending.get("editable") or {}).get("asset_code"), sync_homebox=False)
         try:
             preview = print_item_label_set(
                 item,
@@ -1132,7 +1354,12 @@ class TaskRunner:
         if not pending or not pending.get("committed_item"):
             return None
         config = config_snapshot()
-        return rfid_payload(pending["committed_item"], config.get("homebox_url", DEFAULT_HOMEBOX_URL))
+        item = self._ensure_item_asset_id(
+            pending["committed_item"],
+            asset_code=(pending.get("editable") or {}).get("asset_code"),
+            sync_homebox=False,
+        )
+        return rfid_payload(item, config.get("homebox_url", DEFAULT_HOMEBOX_URL))
 
     def save_intake_record_for_pending(self, reason: str = "manual"):
         with self.lock:
@@ -1226,10 +1453,13 @@ class TaskRunner:
             code = rfid_epc_code(item) if item else ""
         except Exception:
             code = str(item.get("assetId") or item.get("asset_id") or "")
+        display = display_code(item) if item and code else code
         summary = {
             "name": str(name),
             "item_id": item_id,
             "code": code,
+            "display_code": display,
+            "rfid_epc": code,
             "homebox_url": config.get("homebox_url", DEFAULT_HOMEBOX_URL),
             "item_url": item_url(config.get("homebox_url", DEFAULT_HOMEBOX_URL), item) if item else "",
             "committed_at": pending.get("committed_at"),
@@ -1316,6 +1546,7 @@ class TaskRunner:
                 "category": ai.get("category") or "",
                 "manufacturer": ai.get("manufacturer") or "",
                 "model": ai.get("model") or "",
+                "asset_code": "",
                 "quantity": ai.get("quantity") or 1,
                 "tags": ", ".join([str(t) for t in (ai.get("tags") or [])]) if isinstance(ai.get("tags"), list) else str(ai.get("tags") or ""),
                 "suggested_location": ai.get("suggested_location") or "",
@@ -1327,6 +1558,26 @@ class TaskRunner:
                 "weight_g": measurement.get("weight_g"),
             }
             pending["editable"] = editable
+        item = pending.get("committed_item") if isinstance(pending.get("committed_item"), dict) else {}
+        summary = record.get("summary") if isinstance(record.get("summary"), dict) else {}
+        asset_code = canonical_asset_code(
+            editable.get("asset_code")
+            or editable.get("assetId")
+            or editable.get("asset_id")
+            or summary.get("code")
+            or summary.get("rfid_epc")
+            or item.get("assetId")
+            or item.get("asset_id")
+            or ai.get("assetId")
+            or ai.get("asset_id")
+            or ai.get("code")
+        )
+        if asset_code:
+            editable["asset_code"] = asset_code
+            ai["assetId"] = asset_code
+            if item:
+                item["assetId"] = asset_code
+                item["asset_id"] = asset_code
         pending["imported_record"] = {
             "schema": record.get("schema") or INTAKE_RECORD_SCHEMA,
             "schema_version": record.get("schema_version") or 0,
@@ -1528,8 +1779,26 @@ class StatusProbe:
 
     def _ollama(self):
         config = config_snapshot()
+        ai_target = str(config.get("ai_target") or DEFAULT_AI_TARGET).strip().lower()
+        cloud_provider = str(config.get("cloud_provider") or DEFAULT_CLOUD_PROVIDER).strip().lower()
+        if ai_target == "cloud":
+            cloud = list_openai_compatible_models(
+                cloud_provider,
+                config.get("ai_api_base") or default_cloud_base(cloud_provider),
+                config.get("ai_api_key") or "",
+                timeout=3,
+            )
+            return {
+                "connected": bool(cloud.get("ok")),
+                "provider": cloud_provider,
+                "base_url": cloud.get("base_url"),
+                "model": config.get("ollama_model") or DEFAULT_MODEL,
+                "models": cloud.get("models") or [],
+                "ps": cloud.get("ps") or "",
+                "error": None if cloud.get("ok") else cloud.get("message"),
+            }
         api = normalize_ollama_base_url(config.get("ollama_url") or DEFAULT_OLLAMA_URL)
-        result = {"connected": False, "model": config.get("ollama_model") or DEFAULT_MODEL, "models": [], "ps": "", "error": None}
+        result = {"connected": False, "provider": "ollama", "base_url": api, "model": config.get("ollama_model") or DEFAULT_MODEL, "models": [], "ps": "", "error": None}
         try:
             response = requests.get(f"{api}/api/tags", timeout=3)
             response.raise_for_status()
@@ -1668,6 +1937,8 @@ class OrbitHandler(SimpleHTTPRequestHandler):
             if scale_changed:
                 scale_monitor.reconfigure()
             return self._json({"ok": True, "config": public_config(config), "scale_reconfigured": scale_changed})
+        if parsed.path == "/api/ai/models":
+            return self._json(self._ai_models(payload))
         if parsed.path == "/api/cancel":
             ok, message = task_runner.cancel()
             return self._json({"ok": ok, "message": message, "task": task_runner.snapshot()}, 200 if ok else 409)
@@ -1884,6 +2155,7 @@ class OrbitHandler(SimpleHTTPRequestHandler):
 
     def _summarize_homebox_item(self, item: dict, detail: bool = False):
         location = item.get("location") if isinstance(item.get("location"), dict) else {}
+        parent = item.get("parent") if isinstance(item.get("parent"), dict) else {}
         tags = item.get("tags") or item.get("labels") or []
         tag_names = []
         for tag in tags if isinstance(tags, list) else []:
@@ -1906,7 +2178,13 @@ class OrbitHandler(SimpleHTTPRequestHandler):
             "code": display_code(item),
             "rfid_code": rfid_epc_code(item),
             "url": item_url(config_snapshot().get("homebox_url", DEFAULT_HOMEBOX_URL), item),
-            "location": str(item.get("locationName") or location.get("name") or ""),
+            "location": str(
+                item.get("locationName")
+                or item.get("parentName")
+                or location.get("name")
+                or parent.get("name")
+                or ""
+            ),
             "tags": tag_names,
             "manufacturer": str(item.get("manufacturer") or ""),
             "model": str(item.get("modelNumber") or item.get("model") or ""),
@@ -1924,6 +2202,13 @@ class OrbitHandler(SimpleHTTPRequestHandler):
         needle = query.casefold()
         if not needle:
             return True
+        location = item.get("location") if isinstance(item.get("location"), dict) else {}
+        parent = item.get("parent") if isinstance(item.get("parent"), dict) else {}
+        tags = item.get("tags") or item.get("labels") or []
+        tag_text = " ".join(
+            str(tag.get("name") if isinstance(tag, dict) else tag)
+            for tag in tags if tag
+        )
         text = " ".join(
             str(value)
             for value in (
@@ -1931,9 +2216,14 @@ class OrbitHandler(SimpleHTTPRequestHandler):
                 item.get("assetId"),
                 item.get("name"),
                 item.get("description"),
+                item.get("notes"),
                 item.get("manufacturer"),
                 item.get("modelNumber"),
                 item.get("locationName"),
+                item.get("parentName"),
+                location.get("name"),
+                parent.get("name"),
+                tag_text,
                 rfid_epc_code(item),
                 display_code(item),
             )
@@ -2285,6 +2575,40 @@ Get-CimInstance Win32_Process | Where-Object {{
         except Exception:
             pass
         return result
+
+    def _ai_models(self, payload):
+        provider = str(payload.get("provider") or "ollama").strip().lower()
+        if provider == "ollama":
+            base = normalize_ollama_base_url(payload.get("base_url") or payload.get("url") or DEFAULT_OLLAMA_URL)
+            result = {"ok": False, "provider": "ollama", "base_url": base, "models": [], "ps": "", "message": ""}
+            try:
+                response = requests.get(f"{base}/api/tags", timeout=5)
+                response.raise_for_status()
+                models = response.json().get("models") or []
+                result["models"] = [m.get("name") for m in models if m.get("name")]
+                result["ok"] = True
+            except Exception as exc:
+                result["message"] = f"读取模型列表失败: {exc}"
+                return result
+
+            try:
+                ps = requests.get(f"{base}/api/ps", timeout=3)
+                if ps.ok:
+                    rows = ps.json().get("models") or []
+                    result["ps"] = "\n".join(
+                        f"{row.get('name','')} {row.get('size_vram') or row.get('size') or ''} {row.get('processor','')}"
+                        for row in rows
+                    ) or "当前未加载模型"
+            except Exception:
+                pass
+            return result
+
+        if provider not in {"openai", "gemini"}:
+            provider = "openai"
+        config = config_snapshot()
+        api_key = str(payload.get("api_key") or config.get("ai_api_key") or "").strip()
+        base = normalize_openai_base_url(payload.get("base_url") or config.get("ai_api_base"), provider)
+        return list_openai_compatible_models(provider, base, api_key, timeout=8)
 
 
 def main():
