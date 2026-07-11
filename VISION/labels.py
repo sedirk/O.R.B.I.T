@@ -10,7 +10,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 try:
     import win32print
@@ -26,6 +26,8 @@ LABEL_W_MM = 40
 LABEL_H_MM = 20
 LABEL_W = LABEL_W_MM * DOTS_PER_MM
 LABEL_H = LABEL_H_MM * DOTS_PER_MM
+LABEL_STOCK_COLOR = os.getenv("ORBIT_LABEL_STOCK_COLOR", "#000000")
+LABEL_RIBBON_COLOR = os.getenv("ORBIT_LABEL_RIBBON_COLOR", "#FFFFFF")
 
 
 def font(size: int, bold: bool = False):
@@ -85,15 +87,15 @@ def environment_value(name: str) -> str:
     return ""
 
 
-def owner_line(placeholder: str = "") -> str:
-    line = " ".join(
-        part
-        for part in (
-            environment_value("ORBIT_OWNER_NAME"),
-            environment_value("ORBIT_OWNER_PHONE"),
-        )
-        if part
+def owner_fields() -> tuple[str, str]:
+    return (
+        environment_value("ORBIT_OWNER_NAME"),
+        environment_value("ORBIT_OWNER_PHONE"),
     )
+
+
+def owner_line(placeholder: str = "") -> str:
+    line = " ".join(part for part in owner_fields() if part)
     if line:
         return line
     return placeholder
@@ -150,29 +152,45 @@ def wrap_text(draw, text, max_width, font_obj, max_lines):
     text = str(text or "").strip()
     if not text:
         return []
-    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*|[\u4e00-\u9fff]+|[^\sA-Za-z0-9\u4e00-\u9fff]", text)
+    token_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*|[\u4e00-\u9fff]|[^\sA-Za-z0-9\u4e00-\u9fff]")
+    tokens = []
+    previous_end = 0
+    for match in token_pattern.finditer(text):
+        gap = text[previous_end : match.start()]
+        tokens.append((match.group(0), bool(re.search(r"\s", gap))))
+        previous_end = match.end()
     lines = []
     current = ""
-    for token in tokens:
+    truncated = False
+    for token, had_space in tokens:
         if not token.strip():
             continue
-        joiner = "" if not current or re.match(r"^[^\w\u4e00-\u9fff]+$", token) else " "
+        joiner = " " if current and had_space else ""
         trial = current + joiner + token
         if text_width(draw, trial, font_obj) <= max_width:
             current = trial
             continue
         if current:
             lines.append(current)
-        if len(lines) >= max_lines:
-            break
+            current = ""
+            if len(lines) >= max_lines:
+                truncated = True
+                break
         if text_width(draw, token, font_obj) <= max_width:
             current = token
         else:
             current = ellipsize(draw, token, max_width, font_obj)
+            truncated = True
     if current and len(lines) < max_lines:
         lines.append(current)
-    if len(lines) == max_lines and text_width(draw, lines[-1], font_obj) > max_width:
-        lines[-1] = ellipsize(draw, lines[-1], max_width, font_obj)
+    elif current:
+        truncated = True
+    if truncated and lines and not lines[-1].endswith("..."):
+        suffix = "..."
+        last = lines[-1]
+        while last and text_width(draw, last + suffix, font_obj) > max_width:
+            last = last[:-1]
+        lines[-1] = last + suffix if last else suffix
     return lines
 
 
@@ -194,6 +212,14 @@ def text_width(draw, text, font_obj):
 def text_height(draw, text, font_obj):
     box = draw.textbbox((0, 0), text or "A", font=font_obj)
     return box[3] - box[1]
+
+
+def fit_font_to_width(draw, text, max_width, max_size, min_size=8, bold=False):
+    for size in range(max_size, min_size - 1, -1):
+        candidate = font(size, bold=bold)
+        if text_width(draw, text, candidate) <= max_width:
+            return candidate
+    return font(min_size, bold=bold)
 
 
 def aruco_image(code: str, size: int = 88) -> Image.Image:
@@ -309,13 +335,19 @@ def code_label_image(
     img.paste(qr_image(url, item_qr_size), (item_qr_x, item_qr_y))
     img.paste(qr_image(owner_home_url(), home_qr_size), (home_qr_x, home_qr_y))
     left_w = item_qr_x - 16
-    owner_font = font(13, bold=True)
-    owner = owner_line(owner_placeholder)
-    if owner:
-        render_text_lines(draw, (10, 6), owner, left_w, 1, owner_font)
-        name_y = 28
-    else:
-        name_y = 8
+    owner_name, owner_phone = owner_fields()
+    if not owner_name and not owner_phone and owner_placeholder:
+        owner_name = owner_placeholder
+    name_y = 8
+    if owner_name:
+        owner_name_font = fit_font_to_width(draw, owner_name, left_w, max_size=15, min_size=10, bold=True)
+        draw.text((10, 3), ellipsize(draw, owner_name, left_w, owner_name_font), font=owner_name_font, fill=0)
+        name_y = 23
+    if owner_phone:
+        phone_y = 20 if owner_name else 4
+        owner_phone_font = fit_font_to_width(draw, owner_phone, left_w, max_size=15, min_size=10, bold=True)
+        draw.text((10, phone_y), ellipsize(draw, owner_phone, left_w, owner_phone_font), font=owner_phone_font, fill=0)
+        name_y = 38 if owner_name else 24
     render_text_lines(draw, (10, name_y), item.get("name") or ai.get("name") or "", left_w, 2, small)
     marker_size = 48
     marker_y = 72
@@ -328,9 +360,36 @@ def code_label_image(
     return img
 
 
+def print_raster_image(image: Image.Image) -> Image.Image:
+    """Return the exact 1-bit-equivalent raster sent to the thermal printer."""
+    grayscale = image.convert("L")
+    if grayscale.size != (LABEL_W, LABEL_H):
+        grayscale = grayscale.resize((LABEL_W, LABEL_H), Image.Resampling.NEAREST)
+    binary = np.where(np.asarray(grayscale) < 128, 0, 255).astype(np.uint8)
+    return Image.fromarray(binary)
+
+
+def physical_preview_image(image: Image.Image) -> Image.Image:
+    """Color the print-dot mask using the physical stock and ribbon colors."""
+    raster = print_raster_image(image)
+    print_mask = np.asarray(raster) == 0
+    try:
+        stock_color = ImageColor.getrgb(LABEL_STOCK_COLOR)
+    except ValueError:
+        stock_color = (0, 0, 0)
+    try:
+        ribbon_color = ImageColor.getrgb(LABEL_RIBBON_COLOR)
+    except ValueError:
+        ribbon_color = (255, 255, 255)
+    preview = np.empty((LABEL_H, LABEL_W, 3), dtype=np.uint8)
+    preview[:, :] = stock_color
+    preview[print_mask] = ribbon_color
+    return Image.fromarray(preview)
+
+
 def image_to_tspl_bitmap(image: Image.Image) -> bytes:
-    img = image.convert("L").resize((LABEL_W, LABEL_H))
-    arr = (np.asarray(img) < 128).astype(np.uint8)
+    img = print_raster_image(image)
+    arr = (np.asarray(img) == 0).astype(np.uint8)
     packed = np.packbits(arr, axis=1, bitorder="big")
     width_bytes = packed.shape[1]
     header = (
@@ -394,7 +453,7 @@ def ensure_printer_ready(printer_name: str):
 def save_preview(image: Image.Image, name: str) -> Path:
     LOG_DIR.mkdir(exist_ok=True)
     path = LOG_DIR / name
-    image.save(path)
+    physical_preview_image(image).save(path)
     return path
 
 
@@ -413,12 +472,14 @@ def print_item_label_set(
     stamp = time.strftime("%Y%m%d-%H%M%S")
     epc_code = rfid_epc_code(item)
     visible_code = display_code(item)
-    human = human_label_image(item, ai=ai, measurement=measurement)
-    coded = code_label_image(
-        item,
-        homebox_url=homebox_url,
-        ai=ai,
-        owner_placeholder="[Owner Tel]" if dry_run else "",
+    human = print_raster_image(human_label_image(item, ai=ai, measurement=measurement))
+    coded = print_raster_image(
+        code_label_image(
+            item,
+            homebox_url=homebox_url,
+            ai=ai,
+            owner_placeholder="",
+        )
     )
     human_preview = save_preview(human, f"label_human_{epc_code}_{stamp}.png")
     code_preview = save_preview(coded, f"label_code_{epc_code}_{stamp}.png")

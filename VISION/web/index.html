@@ -6,7 +6,7 @@
   <title>O.R.B.I.T. 控制台</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body data-theme="light">
   <header class="topbar">
     <div class="brand">
       <div class="mark">O</div>
@@ -20,6 +20,7 @@
       <button class="mode-button active" data-app-mode="intake">入库</button>
       <button class="mode-button" data-app-mode="find">找物</button>
     </div>
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="切换主题">明亮</button>
     <div class="chips">
       <span class="chip" id="chip-realsense">主相机</span>
       <span class="chip" id="chip-scale">Scale</span>
@@ -130,18 +131,18 @@
         <div id="labelPreviewPanel" class="label-preview-panel" hidden>
           <div class="label-preview-head">
             <div>
-              <span class="label">标签预览</span>
-              <strong id="labelPreviewTitle">写标签前可预览</strong>
+              <span class="label">打印预览</span>
+              <strong id="labelPreviewTitle">最终物理打印效果</strong>
             </div>
             <button id="labelPreviewRefresh" class="mini-button" type="button">刷新预览</button>
           </div>
           <div class="label-preview-grid">
             <figure>
-              <figcaption>人读 PET</figcaption>
+              <figcaption>人读 PET · 40 × 20 mm</figcaption>
               <img id="humanLabelPreview" alt="人读 PET 标签预览">
             </figure>
             <figure>
-              <figcaption>AR / QR PET</figcaption>
+              <figcaption>AR / QR PET · 40 × 20 mm</figcaption>
               <img id="codeLabelPreview" alt="AR 和 QR 标签预览">
             </figure>
             <div class="label-preview-meta">
@@ -203,7 +204,10 @@
         <div class="find-detail">
           <div class="list-head">
             <span>详情</span>
-            <button id="findOpenHomebox" class="mini-button" disabled>打开 Homebox</button>
+            <div class="detail-actions">
+              <button id="findTrackRfid" class="mini-button" disabled>搜索 RFID</button>
+              <button id="findOpenHomebox" class="mini-button" disabled>打开 Homebox</button>
+            </div>
           </div>
           <div id="findDetail" class="find-detail-body">
             <div class="empty-state">选择一个物品查看位置、标签和识别信息</div>

@@ -944,17 +944,28 @@ class IntelligentScanner:
                 payload["options"]["num_gpu"] = int(self.ollama_num_gpu)
             return payload
 
-        def build_openai_payload(user_prompt, num_predict, response_format="json_schema", include_reasoning=True):
+        def build_openai_payload(
+            user_prompt,
+            num_predict,
+            response_format="json_schema",
+            include_reasoning=True,
+            include_temperature=True,
+            token_parameter=None,
+        ):
+            provider_name = (getattr(self, "ai_provider", "ollama") or "ollama").strip().lower()
+            token_parameter = token_parameter or (
+                "max_completion_tokens" if provider_name == "openai" else "max_tokens"
+            )
             payload = {
                 "model": self._cloud_model_name(),
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": self._openai_content_from_images(user_prompt, images)},
                 ],
-                "temperature": 0,
-                "max_tokens": int(num_predict),
+                token_parameter: int(num_predict),
             }
-            provider_name = (getattr(self, "ai_provider", "ollama") or "ollama").strip().lower()
+            if include_temperature:
+                payload["temperature"] = 0
             if provider_name == "gemini" and include_reasoning:
                 payload["reasoning_effort"] = "low"
             if response_format == "json_schema":
@@ -970,10 +981,44 @@ class IntelligentScanner:
                 payload["response_format"] = {"type": "json_object"}
             return payload
 
+        def cloud_error(response):
+            try:
+                error = (response.json() or {}).get("error") or {}
+                if isinstance(error, dict):
+                    return str(error.get("param") or "").lower(), str(error.get("message") or "").lower()
+            except (TypeError, ValueError):
+                pass
+            return "", str(getattr(response, "text", "") or "").lower()
+
+        def cloud_parameter_rejected(response, parameter):
+            if response.status_code not in {400, 422}:
+                return False
+            error_param, error_message = cloud_error(response)
+            parameter = str(parameter or "").lower()
+            return error_param == parameter or (
+                parameter in error_message
+                and any(marker in error_message for marker in ("unsupported", "not supported", "unknown parameter"))
+            )
+
+        def cloud_response_format_rejected(response, response_format):
+            if response.status_code not in {400, 422} or not response_format:
+                return False
+            error_param, error_message = cloud_error(response)
+            return error_param == "response_format" or any(
+                marker in error_message
+                for marker in ("response_format", str(response_format).lower())
+            )
+
         def cloud_response_format(provider_name, attempt_index):
             if provider_name == "gemini":
                 return "json_object" if attempt_index == 0 else None
             return "json_schema" if attempt_index == 0 else "json_object"
+
+        def cloud_temperature_enabled(provider_name):
+            if provider_name != "openai":
+                return True
+            model_name = self._cloud_model_name().strip().lower()
+            return not model_name.startswith(("gpt-5", "o1", "o3", "o4"))
 
         def extract_openai_content(result):
             choices = result.get("choices") or []
@@ -1043,21 +1088,64 @@ class IntelligentScanner:
                 content = ""
                 last_error_text = ""
                 retry_prompt = prompt
+
+                def send_cloud_request(active_prompt, max_output_tokens, response_format):
+                    token_parameter = "max_completion_tokens" if provider == "openai" else "max_tokens"
+                    include_temperature = cloud_temperature_enabled(provider)
+                    include_reasoning = True
+
+                    def send():
+                        request_payload = build_openai_payload(
+                            active_prompt,
+                            max_output_tokens,
+                            response_format=response_format,
+                            include_reasoning=include_reasoning,
+                            include_temperature=include_temperature,
+                            token_parameter=token_parameter,
+                        )
+                        request_response = requests.post(
+                            endpoint,
+                            headers=headers,
+                            json=request_payload,
+                            timeout=self.ollama_timeout,
+                        )
+                        return request_response, request_payload
+
+                    response, payload = send()
+                    if cloud_parameter_rejected(response, token_parameter):
+                        replacement = (
+                            "max_tokens" if token_parameter == "max_completion_tokens" else "max_completion_tokens"
+                        )
+                        print(f"⚠️ 云端接口不接受 {token_parameter}，改用 {replacement} 重试...")
+                        token_parameter = replacement
+                        response, payload = send()
+                    if cloud_parameter_rejected(response, "temperature"):
+                        print("⚠️ 当前模型不接受 temperature，移除后重试...")
+                        include_temperature = False
+                        response, payload = send()
+                    if cloud_parameter_rejected(response, "reasoning_effort") and "reasoning_effort" in payload:
+                        print("⚠️ 云端接口不接受 reasoning_effort，移除后重试...")
+                        include_reasoning = False
+                        response, payload = send()
+                    return response, payload
+
                 for attempt in range(2):
                     attempt_num_predict = cloud_num_predict if attempt == 0 else max(cloud_num_predict, 12288 if provider == "gemini" else 4096)
                     response_format = cloud_response_format(provider, attempt)
                     active_response_format = response_format
-                    payload = build_openai_payload(retry_prompt, attempt_num_predict, response_format=active_response_format)
-                    response = requests.post(endpoint, headers=headers, json=payload, timeout=self.ollama_timeout)
-                    if response.status_code in {400, 422} and response_format:
+                    response, payload = send_cloud_request(
+                        retry_prompt,
+                        attempt_num_predict,
+                        active_response_format,
+                    )
+                    if cloud_response_format_rejected(response, response_format):
                         print(f"⚠️ 云端接口不接受 {response_format}，改用纯提示词 JSON 请求...")
                         active_response_format = None
-                        payload = build_openai_payload(retry_prompt, attempt_num_predict, response_format=active_response_format)
-                        response = requests.post(endpoint, headers=headers, json=payload, timeout=self.ollama_timeout)
-                    if response.status_code in {400, 422} and provider == "gemini" and "reasoning_effort" in payload:
-                        print("⚠️ 云端接口不接受 reasoning_effort，移除后重试...")
-                        payload = build_openai_payload(retry_prompt, attempt_num_predict, response_format=active_response_format, include_reasoning=False)
-                        response = requests.post(endpoint, headers=headers, json=payload, timeout=self.ollama_timeout)
+                        response, payload = send_cloud_request(
+                            retry_prompt,
+                            attempt_num_predict,
+                            active_response_format,
+                        )
 
                     if response.status_code != 200:
                         last_error_text = response.text

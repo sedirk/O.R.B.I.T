@@ -10,6 +10,7 @@ O.R.B.I.T. 是一个面向工作室、实验室和零件仓的半自动物品管
 
 - **入库**：拍照、框选、识别、人工编辑、写入 Homebox、打印 PET 标签、写入 RFID 标签。
 - **找物**：通过 Homebox 文本检索和 RFID 盘点辅助定位已入库物品。
+- **界面**：网页控制台默认使用明亮主题，也可切换并记住深色主题。
 
 ## 当前能力
 
@@ -22,7 +23,7 @@ O.R.B.I.T. 是一个面向工作室、实验室和零件仓的半自动物品管
 - AI 支持本机 Ollama、局域网 Ollama 和 OpenAI 兼容云端接口；GUI 可读取当前服务上的模型列表，并选择图像降采样策略。
 - Homebox 支持登录、读取已有标签和位置、严格复用已有标签/位置、创建物品、上传照片、写入自定义字段。
 - 若输入了 Homebox 中不存在的位置，GUI 会要求确认后再创建新位置，避免 Homebox 500 错误。
-- 标签模块支持 40 mm x 20 mm PET 标签预览和打印：人读标签、AR/QR 标签、RFID EPC。
+- 标签模块支持 40 mm x 20 mm PET 标签预览和打印：人读标签、AR/QR 标签、RFID EPC；预览使用与 TSPL 相同的 1-bit 点阵，并按黑色 PET、白色碳带显示物理成品效果。
 - RFID 模块支持 E710/IE701 串口读写、盘点候选标签、按 RSSI 默认选中最强标签、写入前确认、写入后复读校验。
 - 找物模式将 Homebox 数据库检索和 RFID 盘点拆成独立标签页，RFID 盘点不会覆盖数据库搜索结果。
 - 每次 Homebox 入库和写标签会保存本地 `.orbit-intake.json` 记录，可在 GUI 中导入恢复当时的物品状态。
@@ -96,6 +97,8 @@ $env:RFID_PORT = "COM3"
 
 $env:ORBIT_OWNER_NAME = "<owner name>"
 $env:ORBIT_OWNER_PHONE = "<owner phone>"
+$env:ORBIT_LABEL_STOCK_COLOR = "#000000"
+$env:ORBIT_LABEL_RIBBON_COLOR = "#FFFFFF"
 ```
 
 启动 GUI：
@@ -148,10 +151,11 @@ Start-Process powershell -Verb RunAs -ArgumentList "-ExecutionPolicy Bypass -Fil
 3. 左侧结果区可在 **Homebox** 和 **RFID** 两个标签页之间切换；两边状态相互独立。
 4. 使用 RFID 盘点读取天线附近 EPC，并尝试匹配 Homebox 中的 O.R.B.I.T. 编号。
 5. 打开匹配物品后，可查看位置、标签、编号和 Homebox 链接。
+6. 点击 **搜索 RFID** 可持续刷新目标标签的 RSSI、天线和更新时间；停止搜索或切换物品后轮询自动结束。
 
 RFID 盘点结果按已匹配物品优先、RSSI 强度优先排序；未匹配标签会保留 EPC、RSSI 和天线信息，方便判断附近是否有未登记或旧规范标签。
 
-找物模式仍在迭代，后续计划接入更完整的位置树、RSSI 变化提示和数字孪生场景。
+找物模式仍在迭代，后续计划接入更完整的位置树、批量盘点和数字孪生场景。
 
 ## Homebox 约定
 
@@ -185,7 +189,7 @@ YYMMDDNNNN
 这样 `ORB-` 只作为人读显示前缀，不占用 RFID EPC 字节；RFID 与 Homebox 仍保持同一个可互相推导的底层编号。
 
 - 人读 PET 标签：物品名、品牌/型号、重量、尺寸、分类标签、位置和显示码。
-- AR/QR PET 标签：所有者占位、物品名、显示码、AR ID 图形和 Homebox 物品页二维码。
+- AR/QR PET 标签：所有者姓名与电话、物品名、显示码、AR ID 图形和 Homebox 物品页二维码。
 - RFID 标签：写入 96-bit EPC 范围内的纯数字资产码，默认 10 bytes / 80 bits。
 
 二维码当前只写入 Homebox 物品页 URL：
@@ -275,12 +279,12 @@ rg -n "HOMEBOX_PASSWORD|HOMEBOX_TOKEN|password|token|secret" .
 - 本机 4GB 显存运行视觉语言模型速度有限，正式入库建议使用局域网高显存 GPU 主机上的 Ollama 或 OpenAI 兼容云端模型。
 - 视觉模型可能混淆品牌、规格和型号，入库前必须人工确认。
 - RFID 当前主要写 EPC 区，不锁卡、不写 User 区。
-- 找物模式仍处于早期阶段，RFID RSSI 定位和 3D/Unity 数字孪生尚未完整接入。
+- 找物模式仍处于早期阶段，RFID RSSI 可用于近距离信号搜索，但尚未完成方向估计和 3D/Unity 数字孪生。
 
 ## 路线图
 
 - 改进纯视觉或远程 SAM 类分割，减少对深度分割的依赖。
-- 完善找物模式：位置树、RFID RSSI 趋势、批量盘点和物品详情页。
+- 完善找物模式：位置树、RFID RSSI 趋势可视化、批量盘点和物品详情页。
 - 增加标签模板编辑器，支持不同纸张和不同信息密度。
 - 支持 RFID User 区写入、重复写保护和更完整的写入校验。
 - 将 Homebox 位置树、物品照片和 3DGS/Unity 场景关联，形成可检索的数字孪生。

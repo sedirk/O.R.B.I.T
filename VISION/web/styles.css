@@ -1,4 +1,30 @@
 :root {
+  color-scheme: light;
+  --bg: #f2f5f4;
+  --panel: #ffffff;
+  --panel-2: #f7faf9;
+  --line: #d7e0dc;
+  --text: #17211d;
+  --muted: #66756f;
+  --green: #148f48;
+  --yellow: #a97610;
+  --red: #c4423d;
+  --cyan: #247f91;
+  --ink: #ffffff;
+  --shadow: 0 12px 32px rgba(28, 45, 38, 0.12);
+  --topbar: #ffffff;
+  --surface: #f7faf9;
+  --surface-2: #edf3f1;
+  --control: #ffffff;
+  --control-hover: #eef5f2;
+  --button: #f4f8f6;
+  --button-hover: #e8f0ed;
+  --input: #ffffff;
+  --log-bg: #ffffff;
+  --log-text: #20302a;
+}
+
+body[data-theme="dark"] {
   color-scheme: dark;
   --bg: #111315;
   --panel: #191d20;
@@ -12,6 +38,16 @@
   --cyan: #4fb3c7;
   --ink: #090a0b;
   --shadow: 0 14px 40px rgba(0, 0, 0, 0.26);
+  --topbar: #151819;
+  --surface: #171b1e;
+  --surface-2: #15191b;
+  --control: #111618;
+  --control-hover: #2a3136;
+  --button: #22282c;
+  --button-hover: #2a3136;
+  --input: #111618;
+  --log-bg: #0b0d0e;
+  --log-text: #dce7e2;
 }
 
 * {
@@ -73,6 +109,23 @@ body {
   border-color: rgba(73, 193, 114, 0.6);
   background: rgba(73, 193, 114, 0.13);
   color: #dcf8e6;
+}
+
+.theme-toggle {
+  height: 34px;
+  min-width: 64px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  background: var(--control);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.theme-toggle:hover {
+  border-color: rgba(20, 143, 72, 0.55);
+  background: var(--control-hover);
 }
 
 .mark {
@@ -417,6 +470,12 @@ select {
   color: var(--text);
 }
 
+.detail-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .find-list {
   min-height: 0;
   overflow: auto;
@@ -458,16 +517,56 @@ select {
   color: var(--green);
 }
 
+.rfid-track-card {
+  display: grid;
+  align-self: start;
+  grid-template-columns: 110px minmax(0, 1fr);
+  border: 1px solid var(--line);
+  background: #101517;
+}
+
+.rfid-track-card.active {
+  border-color: rgba(73, 193, 114, 0.55);
+  background: rgba(73, 193, 114, 0.06);
+}
+
+.rfid-track-card span,
+.rfid-track-card strong {
+  min-width: 0;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rfid-track-card span:nth-last-child(-n + 2),
+.rfid-track-card strong:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.rfid-track-card span {
+  color: var(--muted);
+}
+
+.rfid-track-card strong {
+  color: var(--text);
+}
+
 .find-detail-body {
   min-height: 0;
   overflow: auto;
   padding: 16px;
   display: grid;
+  align-content: start;
+  align-items: start;
+  grid-auto-rows: max-content;
   gap: 14px;
 }
 
 .detail-title {
   display: grid;
+  justify-items: start;
   gap: 6px;
 }
 
@@ -479,6 +578,8 @@ select {
 
 .detail-code {
   display: inline-flex;
+  align-items: center;
+  min-height: 0;
   width: max-content;
   max-width: 100%;
   padding: 4px 8px;
@@ -492,6 +593,7 @@ select {
 
 .detail-grid {
   display: grid;
+  align-self: start;
   grid-template-columns: 120px minmax(0, 1fr);
   border-top: 1px solid var(--line);
   border-left: 1px solid var(--line);
@@ -564,6 +666,12 @@ select {
 .mini-button:hover {
   border-color: #637077;
   background: #2a3136;
+}
+
+.mini-button.active {
+  border-color: rgba(73, 193, 114, 0.7);
+  background: rgba(73, 193, 114, 0.12);
+  color: #dff7e7;
 }
 
 .button:disabled,
@@ -803,8 +911,11 @@ select:focus {
   width: 100%;
   aspect-ratio: 2 / 1;
   object-fit: contain;
-  border: 1px solid #344047;
-  background: #f7f7f2;
+  border: 1px solid #707070;
+  background: #000000;
+  color-scheme: light;
+  filter: none;
+  mix-blend-mode: normal;
   image-rendering: pixelated;
 }
 
@@ -831,13 +942,14 @@ select:focus {
 }
 
 .modules {
-  min-height: 560px;
+  min-height: 0;
+  align-self: start;
 }
 
 .module-shell {
   display: grid;
   grid-template-columns: 150px minmax(0, 1fr);
-  min-height: 500px;
+  min-height: 0;
 }
 
 .module-tabs {
@@ -1266,6 +1378,170 @@ select:focus {
   color: var(--green);
   font-weight: 700;
   white-space: nowrap;
+}
+
+body[data-theme="light"] .topbar,
+body[data-theme="light"] .panel,
+body[data-theme="light"] .modal-panel {
+  background: var(--panel);
+}
+
+body[data-theme="light"] .app-mode,
+body[data-theme="light"] .mark,
+body[data-theme="light"] .chip,
+body[data-theme="light"] .state,
+body[data-theme="light"] select,
+body[data-theme="light"] input,
+body[data-theme="light"] textarea,
+body[data-theme="light"] .find-input,
+body[data-theme="light"] .button,
+body[data-theme="light"] .mini-button,
+body[data-theme="light"] .rfid-choice,
+body[data-theme="light"] .radio-group,
+body[data-theme="light"] .rfid-empty,
+body[data-theme="light"] .check-field,
+body[data-theme="light"] .combo-row select,
+body[data-theme="light"] .host-input {
+  border-color: var(--line);
+  background: var(--control);
+  color: var(--text);
+}
+
+body[data-theme="light"] .mode-button.active,
+body[data-theme="light"] .chip.ok,
+body[data-theme="light"] .state.ok,
+body[data-theme="light"] .rfid-choice.selected,
+body[data-theme="light"] .mini-button.active,
+body[data-theme="light"] .rfid-track-card.active {
+  border-color: rgba(20, 143, 72, 0.42);
+  background: rgba(20, 143, 72, 0.09);
+  color: #0e6f38;
+}
+
+body[data-theme="light"] .chip.warn,
+body[data-theme="light"] .state.warn {
+  border-color: rgba(169, 118, 16, 0.38);
+  background: rgba(169, 118, 16, 0.09);
+  color: var(--yellow);
+}
+
+body[data-theme="light"] .chip.bad,
+body[data-theme="light"] .state.bad {
+  border-color: rgba(196, 66, 61, 0.38);
+  background: rgba(196, 66, 61, 0.08);
+  color: var(--red);
+}
+
+body[data-theme="light"] .panel-head,
+body[data-theme="light"] .controls,
+body[data-theme="light"] .find-toolbar,
+body[data-theme="light"] .weight-band,
+body[data-theme="light"] .task-meta,
+body[data-theme="light"] .editor,
+body[data-theme="light"] .editor-head,
+body[data-theme="light"] .label-preview-panel,
+body[data-theme="light"] .module-tabs,
+body[data-theme="light"] .module-pages,
+body[data-theme="light"] .module-tab,
+body[data-theme="light"] .module-page.active,
+body[data-theme="light"] .find-source-tab,
+body[data-theme="light"] .modal-head,
+body[data-theme="light"] .modal-actions {
+  background: var(--surface);
+}
+
+body[data-theme="light"] .find-source-tab.active,
+body[data-theme="light"] .module-tab.active,
+body[data-theme="light"] .find-item:hover,
+body[data-theme="light"] .find-item.active,
+body[data-theme="light"] .module-tab:hover {
+  background: var(--surface-2);
+}
+
+body[data-theme="light"] .result-surface,
+body[data-theme="light"] .find-results,
+body[data-theme="light"] .find-detail,
+body[data-theme="light"] .module-summary > div,
+body[data-theme="light"] .device-row,
+body[data-theme="light"] .rfid-probe-panel,
+body[data-theme="light"] .rfid-probe-row,
+body[data-theme="light"] .rfid-track-card,
+body[data-theme="light"] .detail-grid,
+body[data-theme="light"] .tag-pill,
+body[data-theme="light"] .label-preview-meta,
+body[data-theme="light"] .mono {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+body[data-theme="light"] .image-wrap {
+  background: #edf3f1;
+}
+
+body[data-theme="light"] .image-wrap img {
+  background: #0b0d0e;
+}
+
+body[data-theme="light"] .view-label {
+  border-color: rgba(23, 33, 29, 0.16);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+}
+
+body[data-theme="light"] .button:hover,
+body[data-theme="light"] .mini-button:hover,
+body[data-theme="light"] .theme-toggle:hover {
+  background: var(--button-hover);
+}
+
+body[data-theme="light"] .button.primary {
+  border-color: rgba(20, 143, 72, 0.48);
+  background: #e5f5eb;
+  color: #0e6f38;
+}
+
+body[data-theme="light"] .button.secondary {
+  border-color: rgba(36, 127, 145, 0.36);
+  background: #eef7f8;
+}
+
+body[data-theme="light"] .button.danger {
+  border-color: rgba(196, 66, 61, 0.36);
+  background: #fff0ef;
+}
+
+body[data-theme="light"] .button.ghost {
+  background: #f7faf9;
+}
+
+body[data-theme="light"] .detail-code {
+  border-color: rgba(20, 143, 72, 0.38);
+  background: rgba(20, 143, 72, 0.09);
+  color: #0e6f38;
+}
+
+body[data-theme="light"] .label-preview-grid figure,
+body[data-theme="light"] .label-option-list .check-field {
+  border-color: var(--line);
+  background: #ffffff;
+}
+
+body[data-theme="light"] .label-preview-grid img {
+  background: #000000;
+}
+
+body[data-theme="light"] .log-box {
+  background: var(--log-bg);
+  color: var(--log-text);
+}
+
+body[data-theme="light"] .modal-backdrop {
+  background: rgba(36, 47, 42, 0.42);
+}
+
+body[data-theme="light"] ::placeholder {
+  color: #8a9993;
 }
 
 @media (max-width: 980px) {

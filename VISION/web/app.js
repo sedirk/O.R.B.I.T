@@ -32,10 +32,48 @@ const state = {
   findDbLoaded: false,
   findActiveTab: "db",
   findSelected: null,
+  findSelectedItem: null,
   findSelectedUrl: "",
+  findTracking: false,
+  findTrackTimer: null,
+  findTrackBusy: false,
+  findTrackTarget: null,
+  findTrackLastTag: null,
+  findTrackUpdatedAt: null,
 };
 
 let configSaveTimer = null;
+const THEME_STORAGE_KEY = "orbitTheme.v2";
+
+function applyTheme(theme) {
+  const selected = theme === "dark" ? "dark" : "light";
+  document.body.dataset.theme = selected;
+  const button = $("themeToggle");
+  if (button) {
+    button.textContent = selected === "dark" ? "深色" : "明亮";
+    button.setAttribute("aria-label", selected === "dark" ? "切换到明亮主题" : "切换到深色主题");
+  }
+}
+
+function initTheme() {
+  let saved = "light";
+  try {
+    saved = localStorage.getItem(THEME_STORAGE_KEY) || "light";
+  } catch {
+    saved = "light";
+  }
+  applyTheme(saved);
+}
+
+function toggleTheme() {
+  const next = document.body.dataset.theme === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch {
+    // localStorage may be disabled in private or restricted contexts.
+  }
+}
 
 function fmtTime(ms) {
   if (!ms) return "--";
@@ -138,6 +176,7 @@ function setBusy(running) {
 
 function setAppMode(mode) {
   state.appMode = mode === "find" ? "find" : "intake";
+  if (state.appMode !== "find") stopFindRfidTracking(false);
   $("intakePanel").hidden = state.appMode !== "intake";
   $("finderPanel").hidden = state.appMode !== "find";
   document.querySelectorAll("[data-app-mode]").forEach((button) => {
@@ -1078,12 +1117,87 @@ function itemSubtitle(item) {
   return parts.join(" · ") || item.description || "--";
 }
 
+function canonicalRfidText(value) {
+  let text = String(value || "").trim().toUpperCase();
+  if (!text) return "";
+  text = text.replace(/^ORB[-_\s]*/i, "");
+  return text.replace(/[^A-Z0-9]/g, "");
+}
+
+function asciiFromHex(value) {
+  const hex = String(value || "").replace(/[^0-9A-Fa-f]/g, "");
+  if (!hex || hex.length % 2) return "";
+  try {
+    let out = "";
+    for (let i = 0; i < hex.length; i += 2) {
+      const code = parseInt(hex.slice(i, i + 2), 16);
+      if (code < 32 || code > 126) return "";
+      out += String.fromCharCode(code);
+    }
+    return out;
+  } catch {
+    return "";
+  }
+}
+
+function itemRfidCandidates(item) {
+  return [
+    item?.rfid_code,
+    item?.code,
+    item?.assetId,
+    item?.asset_id,
+    item?.id,
+  ].map(canonicalRfidText).filter(Boolean);
+}
+
+function tagRfidCandidates(tag) {
+  const decoded = asciiFromHex(tag?.epc);
+  return [
+    tag?.epc_ascii,
+    decoded,
+    tag?.item?.rfid_code,
+    tag?.item?.code,
+    tag?.item?.assetId,
+    tag?.item?.asset_id,
+    tag?.item?.id,
+  ].map(canonicalRfidText).filter(Boolean);
+}
+
+function tagMatchesItem(tag, item) {
+  if (!tag || !item) return false;
+  if (tag.item?.id && item.id && String(tag.item.id) === String(item.id)) return true;
+  const wanted = new Set(itemRfidCandidates(item));
+  return tagRfidCandidates(tag).some((candidate) => wanted.has(candidate));
+}
+
+function findTrackedTag(rows, item) {
+  return (rows || []).find((tag) => tagMatchesItem(tag, item)) || null;
+}
+
+function formatRfidSeen(tag) {
+  if (!tag) return "未读到";
+  const rssi = tag.rssi_dbm === null || tag.rssi_dbm === undefined ? "--" : `${tag.rssi_dbm} dBm`;
+  return `${rssi} · 天线 ${tag.antenna ?? "--"}`;
+}
+
+function updateFindTrackButton() {
+  const button = $("findTrackRfid");
+  if (!button) return;
+  const canTrack = Boolean(state.findSelectedItem && itemRfidCandidates(state.findSelectedItem).length);
+  button.disabled = !canTrack && !state.findTracking;
+  button.classList.toggle("active", state.findTracking);
+  button.textContent = state.findTracking ? "停止搜索" : "搜索 RFID";
+}
+
 function clearFindDetail(message = "选择一个物品查看位置、标签和识别信息") {
+  stopFindRfidTracking(false);
   state.findSelected = null;
+  state.findSelectedItem = null;
   state.findSelectedUrl = "";
   $("findOpenHomebox").disabled = true;
   $("findDetail").innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
   document.querySelectorAll(".find-item").forEach((button) => button.classList.remove("active"));
+  updateFindTrackButton();
 }
 
 function rfidStrength(row) {
@@ -1166,19 +1280,20 @@ function renderFindDbResults(rows, message = "", emptyText = "没有 Homebox 结
   }
 }
 
-function renderFindRfidResults(rows, message = "", emptyText = "未读到 RFID 标签") {
+function renderFindRfidResults(rows, message = "", emptyText = "未读到 RFID 标签", activateTab = true, selectFirst = true) {
   state.findRfidRows = normalizedRfidRows(rows);
-  setFindTab("rfid");
+  if (activateTab) setFindTab("rfid");
   $("findRfidCount").textContent = message || `${state.findRfidRows.length} 个标签`;
   renderFindList("findRfidResults", state.findRfidRows, "rfid", emptyText);
-  if (state.findRfidRows.length) {
+  if (selectFirst && state.findRfidRows.length) {
     window.setTimeout(() => selectFindRow("rfid", 0), 0);
-  } else if (!state.findSelected) {
+  } else if (selectFirst && !state.findSelected) {
     clearFindDetail();
   }
 }
 
 async function selectFindRow(source, index) {
+  if (state.findTracking) stopFindRfidTracking(false);
   const normalizedSource = source === "rfid" ? "rfid" : "db";
   const rows = normalizedSource === "rfid" ? state.findRfidRows : state.findDbRows;
   const row = rows[index];
@@ -1206,7 +1321,85 @@ async function selectFindRow(source, index) {
   renderFindDetail(detail, normalizedSource === "rfid" ? row : null);
 }
 
+function updateFindTrackDisplay(tag = null, statusText = null) {
+  const stateText = statusText || (tag ? "读到目标标签" : "搜索中");
+  const signalText = tag ? formatRfidSeen(tag) : (statusText === "未读到目标标签" ? "未读到" : "等待下一次盘点");
+  setText("findTrackState", stateText);
+  setText("findTrackSignal", signalText);
+  setText("findTrackUpdated", state.findTrackUpdatedAt ? fmtTime(state.findTrackUpdatedAt) : "--");
+}
+
+function stopFindRfidTracking(updateDisplay = true) {
+  if (state.findTrackTimer) {
+    window.clearInterval(state.findTrackTimer);
+    state.findTrackTimer = null;
+  }
+  state.findTracking = false;
+  state.findTrackBusy = false;
+  state.findTrackTarget = null;
+  state.findTrackLastTag = null;
+  state.findTrackUpdatedAt = null;
+  updateFindTrackButton();
+  if (updateDisplay) updateFindTrackDisplay(null, "未开启");
+}
+
+async function tickFindRfidTracking() {
+  if (!state.findTracking || state.findTrackBusy) return;
+  const item = state.findSelectedItem;
+  if (!item || !itemRfidCandidates(item).length) {
+    stopFindRfidTracking();
+    return;
+  }
+  state.findTrackBusy = true;
+  try {
+    const data = await post("/api/find/rfid", runtimeConfigPayload());
+    const rows = data.tags || [];
+    renderFindRfidResults(rows, data.message || "", "未读到 RFID 标签", false, false);
+    const tag = findTrackedTag(state.findRfidRows, item);
+    state.findTrackLastTag = tag;
+    state.findTrackUpdatedAt = Date.now();
+    updateFindTrackDisplay(tag, tag ? "读到目标标签" : "未读到目标标签");
+  } catch (err) {
+    state.findTrackUpdatedAt = Date.now();
+    updateFindTrackDisplay(null, "搜索失败");
+    appendLog(`RFID 搜索失败: ${err}`);
+  } finally {
+    state.findTrackBusy = false;
+  }
+}
+
+function startFindRfidTracking() {
+  const item = state.findSelectedItem;
+  if (!item || !itemRfidCandidates(item).length) {
+    appendLog("当前物品没有可用于 RFID 搜索的编号。");
+    updateFindTrackButton();
+    return;
+  }
+  state.findTracking = true;
+  state.findTrackTarget = {
+    id: item.id || "",
+    code: item.rfid_code || item.code || "",
+    candidates: itemRfidCandidates(item),
+  };
+  state.findTrackLastTag = null;
+  state.findTrackUpdatedAt = null;
+  updateFindTrackButton();
+  updateFindTrackDisplay(null, "搜索中");
+  tickFindRfidTracking();
+  state.findTrackTimer = window.setInterval(tickFindRfidTracking, 1500);
+}
+
+function toggleFindRfidTracking() {
+  if (state.findTracking) {
+    stopFindRfidTracking();
+  } else {
+    startFindRfidTracking();
+  }
+}
+
 function renderFindRfidOnly(tag) {
+  stopFindRfidTracking(false);
+  state.findSelectedItem = null;
   state.findSelectedUrl = "";
   $("findOpenHomebox").disabled = true;
   $("findDetail").innerHTML = `
@@ -1220,11 +1413,14 @@ function renderFindRfidOnly(tag) {
       <span>天线</span><strong>${escapeHtml(tag.antenna ?? "--")}</strong>
     </div>
   `;
+  updateFindTrackButton();
 }
 
 function renderFindDetail(item, rfidTag = null) {
+  state.findSelectedItem = item;
   state.findSelectedUrl = item.url || "";
   $("findOpenHomebox").disabled = !state.findSelectedUrl;
+  updateFindTrackButton();
   const tags = (item.tags || []).map((tag) => `<span class="tag-pill">${escapeHtml(tag)}</span>`).join("");
   const fields = (item.fields || []).map((field) => `
     <span>${escapeHtml(field.name || "--")}</span><strong>${escapeHtml(field.value || "--")}</strong>
@@ -1233,6 +1429,10 @@ function renderFindDetail(item, rfidTag = null) {
     <span>当前 RFID</span><strong>${escapeHtml(rfidTag.epc_ascii || rfidTag.epc || "--")}</strong>
     <span>信号</span><strong>${escapeHtml(rfidTag.rssi_dbm ?? "--")} dBm</strong>
   ` : "";
+  const trackingTag = state.findTracking && tagMatchesItem(state.findTrackLastTag, item) ? state.findTrackLastTag : null;
+  const trackState = state.findTracking ? (trackingTag ? "读到目标标签" : "搜索中") : "未开启";
+  const trackStatus = state.findTracking ? formatRfidSeen(trackingTag) : "点击搜索 RFID 后持续刷新";
+  const trackUpdated = state.findTracking && state.findTrackUpdatedAt ? fmtTime(state.findTrackUpdatedAt) : "--";
   $("findDetail").innerHTML = `
     <div class="detail-title">
       <h3>${escapeHtml(item.name || "未命名物品")}</h3>
@@ -1246,6 +1446,12 @@ function renderFindDetail(item, rfidTag = null) {
       <span>数量</span><strong>${escapeHtml(item.quantity ?? "--")}</strong>
       ${rfidRows}
       ${fields}
+    </div>
+    <div class="rfid-track-card ${state.findTracking ? "active" : ""}">
+      <span>RFID 搜索</span><strong id="findTrackState">${escapeHtml(trackState)}</strong>
+      <span>目标编号</span><strong>${escapeHtml(item.rfid_code || item.code || "--")}</strong>
+      <span>信号强度</span><strong id="findTrackSignal">${escapeHtml(trackStatus)}</strong>
+      <span>更新时间</span><strong id="findTrackUpdated">${escapeHtml(trackUpdated)}</strong>
     </div>
     <div>
       <span class="label">标签</span>
@@ -1298,7 +1504,7 @@ function renderLabelPreview(preview) {
   if (human) $("humanLabelPreview").src = human;
   if (code) $("codeLabelPreview").src = code;
   const payload = preview.rfid_payload || {};
-  setText("labelPreviewTitle", preview.code ? `${preview.code} · 预览` : "标签预览");
+  setText("labelPreviewTitle", preview.code ? `${preview.code} · 打印预览` : "最终物理打印效果");
   setText("labelPreviewEpc", payload.epc_code || payload.epc_hex_candidate || "--");
   setText("labelPreviewUrl", payload.url || "--");
 }
@@ -1495,6 +1701,7 @@ function openLabelOptions() {
 }
 
 function attachHandlers() {
+  $("themeToggle").addEventListener("click", toggleTheme);
   document.querySelectorAll("[data-app-mode]").forEach((button) => {
     button.addEventListener("click", () => setAppMode(button.dataset.appMode || "intake"));
   });
@@ -1562,6 +1769,7 @@ function attachHandlers() {
   $("findOpenHomebox").addEventListener("click", () => {
     if (state.findSelectedUrl) window.open(state.findSelectedUrl, "_blank", "noopener");
   });
+  $("findTrackRfid").addEventListener("click", toggleFindRfidTracking);
   [
     "mode",
     "model",
@@ -1781,6 +1989,7 @@ function connectEvents() {
   setInterval(pollFallback, 2000);
 }
 
+initTheme();
 attachHandlers();
 attachSelectionHandlers();
 setAppMode("intake");
